@@ -37,6 +37,7 @@ import {
   parseUploadResponse,
   type MtopEnvelope,
   type MtopFailureKind,
+  mtopTimeoutEnvelope,
   type MtopRequestSpec,
   type PluginOfferExtend,
   type PluginRawOfferItem,
@@ -341,7 +342,19 @@ const MTOP_FAILURES: Record<
   risk_control: { exitCode: 4, code: 'RISK_CONTROL', category: 'risk_challenge', discardHostPage: true },
   not_logged_in: { exitCode: 3, code: 'NOT_LOGGED_IN', category: 'not_logged_in', discardHostPage: true },
   upstream: { exitCode: 9, code: 'UPSTREAM_ERROR', category: 'upstream', discardHostPage: false },
+  // No callback from lib.mtop at all: the host page may be wedged, so it is
+  // thrown away and the next call starts from a fresh one.
+  timeout: { exitCode: 9, code: 'MTOP_TIMEOUT', category: 'upstream', discardHostPage: true },
 };
+
+// How long one mtop request (upload or search) may take before the transport
+// gives up. Normal calls finish in 2–5 s; the daemon must never wait forever
+// because its shared context runs commands serially. Budget: upload + first
+// page = 2 × (40 + 10) s = 100 s, inside a 180 s client-side timeout.
+export const PLUGIN_MTOP_TIMEOUT_MS = 40_000;
+// Extra slack for the Node-side race: if even the in-page timer cannot fire
+// (renderer frozen) the evaluate itself is abandoned.
+export const PLUGIN_MTOP_TIMEOUT_MARGIN_MS = 10_000;
 
 const RISK_HINT_HEADLESS =
   '1688 returned a verification challenge for the plugin engine. Retry once with `--headed`, solve the slider, then continue.';
@@ -386,6 +399,19 @@ export function mtopFailure(
         f.code,
         `1688 session expired during image search (${stage}): ${shown}. Run \`1688 login\`.`,
         { ret, stage, category: f.category, retryable: false },
+      );
+    case 'MTOP_TIMEOUT':
+      return new CliError(
+        f.exitCode,
+        f.code,
+        `1688 image search (${stage}) got no response from lib.mtop: ${shown}. The host page was discarded; retry the call.`,
+        {
+          ret,
+          stage,
+          category: f.category,
+          retryable: true,
+          recoverHint: 'Retry once. If it keeps timing out, run `1688 daemon reload --profile <profile>`.',
+        },
       );
     default:
       return new CliError(f.exitCode, f.code, `1688 image search (${stage}) failed: ${shown}`, {
@@ -694,9 +720,13 @@ function headedRiskHandler(page: Page): PluginSearchHooks['onRiskControl'] {
 // Transport
 // ---------------------------------------------------------------------------
 
-export function pageTransport(page: Page): MtopTransport {
-  return (spec) =>
-    page.evaluate(async (req) => {
+export function pageTransport(
+  page: Page,
+  timeoutMs: number = PLUGIN_MTOP_TIMEOUT_MS,
+  marginMs: number = PLUGIN_MTOP_TIMEOUT_MARGIN_MS,
+): MtopTransport {
+  return (spec) => {
+    const inPage = page.evaluate(async (req) => {
       // Mirrors the extension's mtop wrapper (203.js module 16211): config
       // prefix/mainDomain/subDomain, `customConfig.NeedAuthToken` (false on
       // the token-less v1.0 path) and the X-Accept-Language header.
@@ -720,6 +750,11 @@ export function pageTransport(page: Page): MtopTransport {
         (resolve) => {
           const done: Cb = (res) =>
             resolve({ ret: res?.ret, data: res?.data, api: res?.api, v: res?.v });
+          // lib.mtop sometimes never calls either callback; bound the wait.
+          setTimeout(
+            () => resolve({ ret: [`MTOP_TIMEOUT::no mtop callback within ${req.timeoutMs}ms`] }),
+            req.timeoutMs,
+          );
           m.request!(
             {
               dataType: 'json',
@@ -735,7 +770,17 @@ export function pageTransport(page: Page): MtopTransport {
           );
         },
       );
-    }, spec);
+    }, { ...spec, timeoutMs });
+    // Second line of defence: a frozen renderer would never run the in-page timer.
+    let timer: NodeJS.Timeout | undefined;
+    const abandoned = new Promise<MtopEnvelope>((resolve) => {
+      timer = setTimeout(
+        () => resolve(mtopTimeoutEnvelope(`page.evaluate did not return within ${timeoutMs + marginMs}ms`)),
+        timeoutMs + marginMs,
+      );
+    });
+    return Promise.race([inPage, abandoned]).finally(() => clearTimeout(timer));
+  };
 }
 
 // ---------------------------------------------------------------------------

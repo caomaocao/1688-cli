@@ -107,3 +107,21 @@ existing field.
 - Risk control is per account/cookie and shared with the page engine; the plugin engine reduces the *request footprint per search* (2 mtop calls vs. two full page loads) but does not create a separate budget. Pacing in the calling script still matters.
 - Research behind these decisions: the consuming project's `docs/reports/sourcing_v2_IT_2026-08-29.md` §1 and `docs/design_1688_cli_plugin_engine.md`; raw captures under its `data/sourcing_1688/_plugin/`.
 - npm still publishes 0.1.47; upstream `main` is 0.1.48. This work is fork-only until further notice; install with `pnpm build && npm i -g .`.
+
+## Addendum 2026-08-29 — bounded mtop wait
+
+Observed in the tiktok_sales pipeline: three plugin uploads of one kit-photo cover never came back
+(`page.evaluate` waited on `lib.mtop` callbacks that were never invoked). Because the daemon runs
+commands on one serial queue, every later command queued behind the hung one and timed out on the
+client side; `daemon.log` showed nothing; `daemon reload` was the only way out. The same image
+succeeded later, so the trigger is intermittent.
+
+Decision: `pageTransport(page, timeoutMs = PLUGIN_MTOP_TIMEOUT_MS (40 s), marginMs = 10 s)` bounds
+every mtop request twice — an in-page `setTimeout` resolves a synthetic envelope
+`ret: ["MTOP_TIMEOUT::…"]`, and a Node-side `Promise.race` abandons the evaluate after
+`timeoutMs + marginMs` in case the renderer itself is frozen. `classifyMtopRet` maps it to the new
+kind `timeout` → `CliError` code `MTOP_TIMEOUT` (exit 9, category upstream, `retryable: true`), and
+the cached hidden host page is discarded so the next call starts fresh. Normal calls finish in
+2–5 s, so the bound never fires on healthy runs; upload + first page stay under 100 s, inside the
+pipeline's 180 s client-side timeout. Tests: `tests/image-search-plugin.test.ts`
+("mtop timeout").

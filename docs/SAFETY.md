@@ -44,9 +44,13 @@ place orders. Treat write actions as explicit user-authorized operations.
   code as exit `9` / `UPSTREAM_ERROR` with the original code in
   `details.ret`. A host page that lands on a login or punish URL is reported
   the same way (`details.stage: "host-page"`); a host page whose `lib.mtop`
-  never becomes ready is exit `9` / `NETWORK_ERROR`. None of these are retried
-  automatically; after `RISK_CONTROL` / `NOT_LOGGED_IN` the engine discards its
-  cached host page so the next call starts clean. With `--headed` the engine
+  never becomes ready is exit `9` / `NETWORK_ERROR`. A request on which
+  `lib.mtop` never calls back is bounded (40 s in-page timer, +10 s Node-side)
+  and reported as exit `9` / `MTOP_TIMEOUT` (`details.retryable: true`) —
+  this is the only plugin failure that is safe to retry once. None of these
+  are retried automatically; after `RISK_CONTROL` / `NOT_LOGGED_IN` /
+  `MTOP_TIMEOUT` the engine discards its cached host page so the next call
+  starts clean. With `--headed` the engine
   opens the challenge in the visible window, waits up to 3 minutes for the
   user to solve it, then retries that request once. The engine also paces
   itself (≥ 3 s + jitter between plugin calls) on top of the daemon throttle;

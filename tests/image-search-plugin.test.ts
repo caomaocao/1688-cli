@@ -5,9 +5,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CliError } from '../src/io/errors.js';
 import {
   mapPluginPage,
+  mtopFailure,
+  pageTransport,
   runPluginSearch,
+  shouldDiscardHostPage,
   type MtopTransport,
 } from '../src/commands/image-search-plugin.js';
+import type { Page } from 'playwright';
 import { parseEngine } from '../src/commands/image-search.js';
 import {
   PLUGIN_APP_ID,
@@ -19,6 +23,8 @@ import {
   PLUGIN_UPLOAD_VERSION,
   buildSearchRequest,
   buildUploadRequest,
+  classifyMtopRet,
+  mtopRetCode,
   parseSearchResponse,
   parseUploadResponse,
   splitYoloRegions,
@@ -351,5 +357,37 @@ describe('engine option', () => {
 
   it('rejects unknown engines', () => {
     expect(() => parseEngine('browser')).toThrowError(/Unknown --engine/);
+  });
+});
+
+describe('mtop timeout (2026-08-29 daemon hang)', () => {
+  const spec = { api: 'mtop.x', v: '1.0', type: 'POST', data: {} } as unknown as MtopRequestSpec;
+
+  it('pageTransport gives up when the in-page evaluate never returns', async () => {
+    const page = { evaluate: () => new Promise<never>(() => {}) } as unknown as Page;
+    const env = await pageTransport(page, 10, 20)(spec);
+    expect(mtopRetCode(env)).toMatch(/^MTOP_TIMEOUT::page\.evaluate/);
+    expect(classifyMtopRet(mtopRetCode(env))).toBe('timeout');
+  });
+
+  it('pageTransport passes the timeout into the page and returns a normal envelope otherwise', async () => {
+    let seen: unknown;
+    const page = {
+      evaluate: (_fn: unknown, arg: unknown) => {
+        seen = arg;
+        return Promise.resolve({ ret: ['SUCCESS::ok'], data: { x: 1 } });
+      },
+    } as unknown as Page;
+    const env = await pageTransport(page, 1234, 5)(spec);
+    expect((seen as { timeoutMs: number }).timeoutMs).toBe(1234);
+    expect(classifyMtopRet(mtopRetCode(env))).toBe('ok');
+  });
+
+  it('a timeout is its own CLI error and discards the cached host page', () => {
+    const e = mtopFailure('MTOP_TIMEOUT::no mtop callback within 60000ms', 'upload');
+    expect(e.code).toBe('MTOP_TIMEOUT');
+    expect(e.exitCode).toBe(9);
+    expect(shouldDiscardHostPage(e.code)).toBe(true);
+    expect(shouldDiscardHostPage('UPSTREAM_ERROR')).toBe(false);
   });
 });

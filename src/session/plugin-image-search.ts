@@ -142,7 +142,16 @@ export interface MtopEnvelope {
   v?: string;
 }
 
-export type MtopFailureKind = 'ok' | 'risk_control' | 'not_logged_in' | 'upstream';
+export type MtopFailureKind = 'ok' | 'risk_control' | 'not_logged_in' | 'upstream' | 'timeout';
+
+// Synthetic `ret` produced by the transport when lib.mtop never calls back (the
+// request is neither answered nor failed). Seen 2026-08-29: three uploads of one
+// kit-photo cover hung the daemon's serial queue for good.
+export const MTOP_TIMEOUT_RET = 'MTOP_TIMEOUT';
+
+export function mtopTimeoutEnvelope(reason: string): MtopEnvelope {
+  return { ret: [`${MTOP_TIMEOUT_RET}::${reason}`] };
+}
 
 export function mtopRetCode(env: MtopEnvelope | null | undefined): string {
   const ret = env?.ret;
@@ -153,6 +162,7 @@ export function mtopRetCode(env: MtopEnvelope | null | undefined): string {
 
 export function classifyMtopRet(ret: string): MtopFailureKind {
   if (/^SUCCESS/i.test(ret)) return 'ok';
+  if (ret.startsWith(MTOP_TIMEOUT_RET)) return 'timeout';
   if (/RGV587_ERROR|FAIL_SYS_USER_VALIDATE|punish|滑块|安全验证/i.test(ret)) {
     return 'risk_control';
   }
