@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CliError } from '../src/io/errors.js';
 import {
+  mapPluginPage,
   runPluginSearch,
   type MtopTransport,
 } from '../src/commands/image-search-plugin.js';
@@ -18,7 +19,6 @@ import {
   PLUGIN_UPLOAD_VERSION,
   buildSearchRequest,
   buildUploadRequest,
-  mapPluginPage,
   parseSearchResponse,
   parseUploadResponse,
   splitYoloRegions,

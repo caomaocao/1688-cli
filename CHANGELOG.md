@@ -20,7 +20,8 @@ This project follows [Semantic Versioning](https://semver.org/).
   engine is unchanged. mtop risk-control / session replies map to the usual
   `RISK_CONTROL` (4) / `NOT_LOGGED_IN` (3), other failures to
   `UPSTREAM_ERROR` (9) with the original code; no automatic retry, ≥ 3 s
-  pacing between plugin calls
+  pacing between plugin calls. With `--headed` a risk-control reply opens the
+  challenge in the visible window, waits for the user, and retries once
   (`src/commands/image-search-plugin.ts`, `src/session/plugin-image-search.ts`,
   `tests/image-search-plugin*.test.ts`, `tests/image-search-engine-switch.test.ts`).
 

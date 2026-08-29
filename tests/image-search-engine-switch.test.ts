@@ -20,9 +20,10 @@ const pluginExecuteMock = vi.fn(async () => ({
   yoloCropRegion: [],
   pagesFetched: 1,
 }));
-vi.mock('../src/commands/image-search-plugin.js', () => ({
-  execute: pluginExecuteMock,
-}));
+vi.mock('../src/commands/image-search-plugin.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/commands/image-search-plugin.js')>();
+  return { ...actual, execute: pluginExecuteMock };
+});
 
 vi.mock('../src/io/output.js', () => ({
   emit: vi.fn(),
@@ -57,12 +58,46 @@ describe('image-search engine switch (run)', () => {
     expect(args).toMatchObject({ engine: 'page', max: 20, imagePath: path.resolve(imagePath) });
   });
 
-  it('dispatches engine=plugin with max 40 by default and honours --max', async () => {
+  it('dispatches engine=plugin with max 40 by default, honours --max and nests the plugin flags', async () => {
     const { run } = await import('../src/commands/image-search.js');
     await run({ imagePath, engine: 'plugin' });
-    expect(dispatchMock.mock.calls[0]?.[1]).toMatchObject({ engine: 'plugin', max: 40 });
-    await run({ imagePath, engine: 'plugin', max: '7' });
-    expect(dispatchMock.mock.calls[1]?.[1]).toMatchObject({ engine: 'plugin', max: 7 });
+    expect(dispatchMock.mock.calls[0]?.[1]).toEqual({
+      imagePath: path.resolve(imagePath),
+      max: 40,
+      headed: undefined,
+      engine: 'plugin',
+      plugin: { region: null, imageId: null, raw: false },
+    });
+    await run({ imagePath, engine: 'plugin', max: '7', region: '1,2,3,4', raw: true });
+    expect(dispatchMock.mock.calls[1]?.[1]).toMatchObject({
+      engine: 'plugin',
+      max: 7,
+      plugin: { region: '1,2,3,4', imageId: null, raw: true },
+    });
+    await run({ engine: 'plugin', imageId: '99' });
+    expect(dispatchMock.mock.calls[2]?.[1]).toMatchObject({
+      imagePath: null,
+      plugin: { imageId: '99' },
+    });
+  });
+
+  it('does not nest plugin flags for the page engine', async () => {
+    const { run } = await import('../src/commands/image-search.js');
+    await run({ imagePath });
+    expect(dispatchMock.mock.calls[0]?.[1]).not.toHaveProperty('plugin');
+  });
+
+  it('rejects an oversize image for the plugin engine before dispatch, but not for the page engine', async () => {
+    const { run } = await import('../src/commands/image-search.js');
+    const big = path.join(tmpDir, 'big.jpg');
+    await fs.writeFile(big, Buffer.alloc(3.2 * 1024 * 1024)); // ~4.3 MB base64
+    await expect(run({ imagePath: big, engine: 'plugin' })).rejects.toMatchObject({
+      code: 'BAD_INPUT',
+      message: expect.stringContaining('too large'),
+    });
+    expect(dispatchMock).not.toHaveBeenCalled();
+    await run({ imagePath: big });
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
   });
 
   it('rejects an unknown engine before dispatching', async () => {
@@ -76,13 +111,18 @@ describe('image-search engine switch (execute)', () => {
   it('routes engine=plugin to the plugin executor with the search args', async () => {
     const { execute } = await import('../src/commands/image-search.js');
     const ctx = {} as BrowserContext;
-    const result = await execute(ctx, { imagePath, max: 40, engine: 'plugin' });
+    const result = await execute(ctx, {
+      imagePath,
+      max: 40,
+      engine: 'plugin',
+      plugin: { region: '1,2,3,4', imageId: null, raw: true },
+    });
     expect(pluginExecuteMock).toHaveBeenCalledTimes(1);
     expect(pluginExecuteMock.mock.calls[0]?.[1]).toEqual({
       imagePath,
       imageId: null,
-      region: null,
-      raw: false,
+      region: '1,2,3,4',
+      raw: true,
       max: 40,
       headed: undefined,
     });

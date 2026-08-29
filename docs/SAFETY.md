@@ -42,10 +42,15 @@ place orders. Treat write actions as explicit user-authorized operations.
   reply (`FAIL_SYS_SESSION_EXPIRED`, `FAIL_SYS_ILLEGAL_ACCESS`,
   `FAIL_SYS_TOKEN_*`) as exit `3` / `NOT_LOGGED_IN`; any other non-success
   code as exit `9` / `UPSTREAM_ERROR` with the original code in
-  `details.ret`. None of these are retried automatically, and the engine
-  discards its cached host page so the next call starts clean. The engine also
-  paces itself (≥ 3 s + jitter between plugin calls) on top of the daemon
-  throttle; do not wrap it in tight retry loops.
+  `details.ret`. A host page that lands on a login or punish URL is reported
+  the same way (`details.stage: "host-page"`); a host page whose `lib.mtop`
+  never becomes ready is exit `9` / `NETWORK_ERROR`. None of these are retried
+  automatically; after `RISK_CONTROL` / `NOT_LOGGED_IN` the engine discards its
+  cached host page so the next call starts clean. With `--headed` the engine
+  opens the challenge in the visible window, waits up to 3 minutes for the
+  user to solve it, then retries that request once. The engine also paces
+  itself (≥ 3 s + jitter between plugin calls) on top of the daemon throttle;
+  do not wrap it in tight retry loops.
 
 ## Seller Contact
 

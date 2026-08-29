@@ -16,6 +16,12 @@ import {
   PLUGIN_MAX_RESULTS,
   normalizeRegion,
 } from '../session/plugin-image-search.js';
+import {
+  NO_PLUGIN_FLAGS,
+  assertImageWithinCap,
+  type PluginOffer,
+  type PluginSearchFlags,
+} from './image-search-plugin.js';
 import { type Offer } from './search.js';
 
 export type ImageSearchEngine = 'page' | 'plugin';
@@ -34,7 +40,8 @@ export interface ImageSearchOpts {
 }
 
 export interface ImageSearchArgs {
-  imagePath: string;
+  // null only with `--engine plugin --image-id` (nothing to upload).
+  imagePath: string | null;
   max: number;
   headed?: boolean;
   // `page` (default) scrapes the upload + results pages; `plugin` drives the
@@ -42,11 +49,12 @@ export interface ImageSearchArgs {
   engine?: ImageSearchEngine;
   // --engine plugin only. `region` is 1688's native "x1,x2,y1,y2" (pixels of
   // the uploaded file); `imageId` reuses an earlier upload (imagePath is then
-  // empty); `raw` attaches the untouched server item to each offer.
-  region?: string | null;
-  imageId?: string | null;
-  raw?: boolean;
+  // null); `raw` attaches the untouched server item to each offer.
+  plugin?: PluginSearchFlags;
 }
+
+// The page engine's args once the image path has been validated.
+type PageSearchArgs = ImageSearchArgs & { imagePath: string };
 
 const PLUGIN_ONLY_FLAGS: ReadonlyArray<[keyof ImageSearchOpts, string]> = [
   ['region', '--region'],
@@ -117,24 +125,25 @@ export async function execute(
   args: ImageSearchArgs,
 ): Promise<ImageSearchResult> {
   if (args.engine === 'plugin') {
-    if (args.imagePath && !args.imageId) await assertReadable(args.imagePath);
     const { execute: executePlugin } = await import('./image-search-plugin.js');
     return executePlugin(ctx, {
-      imagePath: args.imagePath || null,
-      imageId: args.imageId ?? null,
-      region: args.region ?? null,
+      ...(args.plugin ?? NO_PLUGIN_FLAGS),
+      imagePath: args.imagePath,
       max: args.max,
-      raw: args.raw === true,
       headed: args.headed,
     });
   }
 
+  if (!args.imagePath) {
+    throw new CliError(2, 'BAD_INPUT', 'Image path or URL required.');
+  }
   await assertReadable(args.imagePath);
+  const pageArgs: PageSearchArgs = { ...args, imagePath: args.imagePath };
 
   return withRecovery(
     ctx,
     { cmd: 'image-search', args },
-    () => executeImageSearch(ctx, args),
+    () => executeImageSearch(ctx, pageArgs),
     { headed: args.headed === true, maxRetries: 1 },
   );
 }
@@ -149,7 +158,7 @@ async function assertReadable(imagePath: string): Promise<void> {
 
 async function executeImageSearch(
   ctx: BrowserContext,
-  args: ImageSearchArgs,
+  args: PageSearchArgs,
 ): Promise<ImageSearchResult> {
   info('Uploading image to 1688...');
   const imageId = await uploadAndGetImageId(ctx, args.imagePath);
@@ -248,22 +257,37 @@ async function searchByImageId(
   }
 }
 
-// Validates the plugin-engine flags. Exported for tests.
-export function parsePluginOptions(
+// `--max` per engine. The page engine keeps its lenient historical parsing
+// (default 20, no cap); the plugin engine is strict: integer 1..200, default
+// one server page. (`sourcing-utils.parsePositiveInt` clamps instead of
+// rejecting and accepts "2.5", so it is not reused here on purpose.)
+export function parseMax(engine: ImageSearchEngine, raw: string | undefined): number {
+  if (engine !== 'plugin') return Math.max(1, parseInt(raw ?? '20', 10));
+  const maxRaw = raw ?? String(PLUGIN_DEFAULT_MAX);
+  const max = /^\d+$/.test(maxRaw.trim()) ? Number(maxRaw.trim()) : NaN;
+  if (!Number.isInteger(max) || max < 1 || max > PLUGIN_MAX_RESULTS) {
+    throw new CliError(
+      2,
+      'BAD_INPUT',
+      `--max must be an integer between 1 and ${PLUGIN_MAX_RESULTS} with --engine plugin (got "${maxRaw}").`,
+    );
+  }
+  return max;
+}
+
+// Validates the plugin-only flags (`--region`, `--image-id`, `--raw`): they
+// are rejected under the page engine and normalised under the plugin engine.
+export function parsePluginFlags(
   engine: ImageSearchEngine,
   opts: ImageSearchOpts,
-): { region: string | null; imageId: string | null; raw: boolean; max: number } {
+): PluginSearchFlags {
   if (engine !== 'plugin') {
     for (const [key, flag] of PLUGIN_ONLY_FLAGS) {
       if (opts[key] !== undefined && opts[key] !== false) {
-        throw new CliError(
-          2,
-          'BAD_INPUT',
-          `${flag} requires --engine plugin.`,
-        );
+        throw new CliError(2, 'BAD_INPUT', `${flag} requires --engine plugin.`);
       }
     }
-    return { region: null, imageId: null, raw: false, max: Math.max(1, parseInt(opts.max ?? '20', 10)) };
+    return NO_PLUGIN_FLAGS;
   }
 
   let region: string | null = null;
@@ -287,25 +311,14 @@ export function parsePluginOptions(
     imageId = id;
   }
 
-  // One full server page by default; hard cap so a typo cannot fan out into
-  // dozens of requests.
-  const maxRaw = opts.max ?? String(PLUGIN_DEFAULT_MAX);
-  const max = /^\d+$/.test(maxRaw.trim()) ? Number(maxRaw.trim()) : NaN;
-  if (!Number.isInteger(max) || max < 1 || max > PLUGIN_MAX_RESULTS) {
-    throw new CliError(
-      2,
-      'BAD_INPUT',
-      `--max must be an integer between 1 and ${PLUGIN_MAX_RESULTS} with --engine plugin (got "${maxRaw}").`,
-    );
-  }
-
-  return { region, imageId, raw: opts.raw === true, max };
+  return { region, imageId, raw: opts.raw === true };
 }
 
 export async function run(opts: ImageSearchOpts): Promise<void> {
   const engine = parseEngine(opts.engine);
-  const plugin = parsePluginOptions(engine, opts);
-  if (!opts.imagePath && !plugin.imageId) {
+  const flags = parsePluginFlags(engine, opts);
+  const max = parseMax(engine, opts.max);
+  if (!opts.imagePath && !flags.imageId) {
     throw new CliError(
       2,
       'BAD_INPUT',
@@ -314,12 +327,11 @@ export async function run(opts: ImageSearchOpts): Promise<void> {
         : 'Image path or URL required.',
     );
   }
-  const max = plugin.max;
 
-  let abs = '';
+  let abs: string | null = null;
   let cleanup: (() => Promise<void>) | null = null;
   // With --image-id the file is not uploaded, so it is not even read.
-  if (opts.imagePath && !plugin.imageId) {
+  if (opts.imagePath && !flags.imageId) {
     if (/^https?:\/\//i.test(opts.imagePath)) {
       info(`Downloading image from URL...`);
       const t = await downloadToTemp(opts.imagePath);
@@ -331,6 +343,9 @@ export async function run(opts: ImageSearchOpts): Promise<void> {
   }
 
   try {
+    // Plugin engine: fail on an oversize file before dispatch, so a doomed
+    // call never pays for pacing or a host-page load.
+    if (engine === 'plugin' && abs) await assertImageWithinCap(abs);
     const data = await dispatch<ImageSearchArgs, ImageSearchResult>(
       'image-search',
       {
@@ -338,9 +353,7 @@ export async function run(opts: ImageSearchOpts): Promise<void> {
         max,
         headed: opts.headed,
         engine,
-        ...(engine === 'plugin'
-          ? { region: plugin.region, imageId: plugin.imageId, raw: plugin.raw }
-          : {}),
+        ...(engine === 'plugin' ? { plugin: flags } : {}),
       },
       { headed: opts.headed, profile: opts.profile },
     );
@@ -413,13 +426,13 @@ function guessExt(url: string, contentType: string | null): string {
 
 // Extra line for `--engine plugin` results: 30-day orders · repurchase · shop
 // years. Exported for tests; returns '' for page-engine offers.
-export function pluginSummaryLine(o: Offer): string {
-  const plugin = (o as Offer & { plugin?: { stats?: { payOrderCount30d?: number | null }; shop?: { shopRepurchaseRate?: number | null; tpYear?: number | null } } }).plugin;
-  if (!plugin) return '';
+export function pluginSummaryLine(o: Offer | PluginOffer): string {
+  if (!('plugin' in o) || !o.plugin) return '';
+  const { stats, shop } = o.plugin;
   const bits = [
-    plugin.stats?.payOrderCount30d != null ? `30d单量 ${plugin.stats.payOrderCount30d}` : null,
-    plugin.shop?.shopRepurchaseRate != null ? `复购 ${plugin.shop.shopRepurchaseRate}%` : null,
-    plugin.shop?.tpYear != null ? `店龄 ${plugin.shop.tpYear}年` : null,
+    stats.payOrderCount30d != null ? `30d单量 ${stats.payOrderCount30d}` : null,
+    shop.shopRepurchaseRate != null ? `复购 ${shop.shopRepurchaseRate}%` : null,
+    shop.tpYear != null ? `店龄 ${shop.tpYear}年` : null,
   ].filter(Boolean);
   return bits.join(' · ');
 }

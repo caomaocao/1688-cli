@@ -1,9 +1,9 @@
-// Pure helpers for `image-search --engine plugin`: the mtop request shapes used
-// by the official "1688官方采购助手" Chrome extension's 找同款 drawer, response
-// parsing, and mapping of its offer items onto the shared `Offer` shape.
-//
-// Everything here is side-effect free so it can be unit-tested against the
-// captured fixtures. Browser work lives in `commands/image-search-plugin.ts`.
+// mtop-level helpers for `image-search --engine plugin`: the request shapes
+// used by the official "1688官方采购助手" Chrome extension's 找同款 drawer,
+// response parsing into raw server shapes, region handling and `ret`
+// classification. Everything here is side-effect free and command-agnostic;
+// the JSON-facing offer mapping lives with the command
+// (`commands/image-search-plugin.ts`) per ARCHITECTURE.md.
 //
 // Request facts (from the extension's kapp bundle,
 // g.alicdn.com/innovateHub/extension-offer-search/0.0.73/js/203.js):
@@ -17,8 +17,6 @@
 //   - response: data.responseInfo.imageSearchOfferResultViewService is a JSON
 //     string -> { data: { offerList, offerSize, totalCount, region,
 //     yoloCropRegion } }; data.offerExtend[id] carries extra per-offer info.
-
-import type { Offer } from './search-mtop.js';
 
 export const PLUGIN_APP_ID = '32517';
 export const PLUGIN_UPLOAD_API = 'mtop.relationrecommend.WirelessRecommend.recommend';
@@ -101,6 +99,11 @@ export function buildSearchRequest(input: SearchRequestInput): MtopRequestSpec {
   };
 }
 
+// Base64 length of a file of `bytes` bytes (4 chars per 3 bytes, padded).
+export function base64LengthOf(bytes: number): number {
+  return Math.ceil(bytes / 3) * 4;
+}
+
 // ---------------------------------------------------------------------------
 // Region
 // ---------------------------------------------------------------------------
@@ -159,8 +162,14 @@ export function classifyMtopRet(ret: string): MtopFailureKind {
   return 'upstream';
 }
 
+// Risk-control envelopes usually carry the verification page in `data.url`.
+export function mtopChallengeUrl(env: MtopEnvelope | null | undefined): string | null {
+  const data = env?.data as { url?: unknown } | null | undefined;
+  return typeof data?.url === 'string' && /^https?:\/\//.test(data.url) ? data.url : null;
+}
+
 // ---------------------------------------------------------------------------
-// Response parsing
+// Response parsing (raw server shapes)
 // ---------------------------------------------------------------------------
 
 export interface PluginRawOfferItem {
@@ -317,258 +326,6 @@ export function parseUploadResponse(data: unknown): string | null {
   if (typeof id === 'string' && /^\d+$/.test(id)) return id;
   if (typeof id === 'number' && Number.isFinite(id)) return String(id);
   return null;
-}
-
-// ---------------------------------------------------------------------------
-// Offer mapping
-// ---------------------------------------------------------------------------
-
-export interface PluginOfferBlock {
-  stats: {
-    saleQuantity: number | null;
-    bookedCount: number | null;
-    payOrderCount30d: number | null;
-    payItemCount30d: number | null;
-    quantitySumMonth: number | null;
-    buyerCount: number | null;
-    sales90: number | null;
-    sales360: number | null;
-    gmv: number | null;
-    repurchaseRate: number | null;
-    inquiryUv: number | null;
-    evaluateCount: number | null;
-  };
-  shop: {
-    memberId: string | null;
-    loginId: string | null;
-    url: string | null;
-    creditLevel: number | null;
-    creditLevelText: string | null;
-    regCapital: string | null;
-    shopRepurchaseRate: number | null;
-    tpYear: number | null;
-    isFactory: boolean;
-    goldSupplier: boolean;
-    compositeScore: number | null;
-    goodsScore: number | null;
-    logisticsScore: number | null;
-    consultationScore: number | null;
-    disputeScore: number | null;
-  };
-  price: {
-    price: number | null;
-    consignPrice: number | null;
-    priceUnderLine: number | null;
-    priceType: string | null;
-    quantityBegin: number | null;
-    unit: string | null;
-  };
-  images: string[];
-  freight: { free: boolean | null; cost: number | null };
-  categoryId: string | null;
-  brand: string | null;
-  attributes: Record<string, string>;
-  service: {
-    sevenDaysReturn: boolean;
-    sevenDaysRefund: boolean;
-    freightInsurance: boolean;
-    mixWholesale: boolean;
-    deliveryHours: number | null;
-  };
-  sameDesignCount: number | null;
-  saleStats: Record<string, unknown> | null;
-  shopInfo: Record<string, unknown> | null;
-  raw?: unknown;
-}
-
-export interface PluginOffer extends Offer {
-  plugin: PluginOfferBlock;
-}
-
-function num(v: unknown): number | null {
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  if (typeof v === 'string') {
-    const cleaned = v.replace(/[,+\s]/g, '');
-    if (!cleaned || !/^-?\d+(?:\.\d+)?$/.test(cleaned)) return null;
-    const n = Number(cleaned);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
-function percent(v: unknown): number | null {
-  if (typeof v === 'string' && v.includes('%')) return num(v.replace('%', ''));
-  const n = num(v);
-  if (n === null) return null;
-  // Ratios like "0.4545" -> 45.45
-  return n <= 1 ? Math.round(n * 10000) / 100 : n;
-}
-
-function str(v: unknown): string | null {
-  return typeof v === 'string' && v.trim() ? v.trim() : null;
-}
-
-function stripHtml(s: string): string {
-  return s.replace(/<[^>]+>/g, '').trim();
-}
-
-export function mapPluginOffer(
-  item: PluginRawOfferItem,
-  extend: PluginOfferExtend | undefined,
-  opts: { raw?: boolean } = {},
-): PluginOffer | null {
-  const idRaw = item.id;
-  const offerId =
-    typeof idRaw === 'number' ? String(idRaw) : typeof idRaw === 'string' ? idRaw : '';
-  if (!/^\d+$/.test(offerId)) return null;
-
-  const info = item.information ?? {};
-  const company = item.company ?? {};
-  const tq = item.tradeQuantity ?? {};
-  const ts = item.tradeService ?? {};
-  const op = item.tradePrice?.offerPrice ?? {};
-  const pi = op.priceInfo ?? {};
-
-  const title = stripHtml(info.subject ?? info.simpleSubject ?? '');
-  const priceText = str(pi.price) ?? str(op.valueString);
-  const price = num(priceText);
-  const years = num(ts.tpYear);
-  const isFactory = company.isFactory === 'Y' || ts.factoryInspection === true;
-
-  const orderCount = num(tq.bookedCount) ?? num(tq.saleQuantity);
-  const repurchaseRate = percent(company.shopRepurchaseRate);
-  const tags = Object.values(item.commonPositionLabels ?? {})
-    .flat()
-    .map((t) => t?.text?.trim() ?? '')
-    .filter(Boolean);
-
-  const attributes: Record<string, string> = {};
-  for (const pair of info.propertyValueModel?.propertyValuePairs ?? []) {
-    if (pair?.pValue && pair?.vValue) attributes[pair.pValue] = pair.vValue;
-  }
-
-  const freightCost = extend?.deliveryChargeInfo?.costs?.[0]?.totalCost;
-  const regCapital =
-    company.regCapital !== undefined && company.regCapital !== null
-      ? `${company.regCapital}${company.regCapitalUnit ?? ''}`
-      : null;
-
-  const block: PluginOfferBlock = {
-    stats: {
-      saleQuantity: num(tq.saleQuantity),
-      bookedCount: num(tq.bookedCount),
-      payOrderCount30d: num(tq.payOrderCount30d),
-      payItemCount30d: num(tq.payItemCount30d),
-      quantitySumMonth: num(tq.quantitySumMonth),
-      buyerCount: num(tq.buyerCount),
-      sales90: num(tq.vaSales90),
-      sales360: num(tq.vaSales360),
-      gmv: num(tq.gmvValue?.integer),
-      repurchaseRate: percent(info.rePurchaseRate),
-      inquiryUv: num(info.byrInquiryUv),
-      evaluateCount: num(info.evaluateCount),
-    },
-    shop: {
-      memberId: str(company.memberId),
-      loginId: str(item.aliTalk?.loginId),
-      url: str(company.url),
-      creditLevel: num(company.creditLevel),
-      creditLevelText: str(company.creditLevelText),
-      regCapital,
-      shopRepurchaseRate: repurchaseRate,
-      tpYear: years,
-      isFactory,
-      goldSupplier: ts.goldSupplier === true,
-      compositeScore: num(ts.compositeNewScore) ?? num(ts.compositeScore),
-      goodsScore: num(ts.goodsScore),
-      logisticsScore: num(ts.logisticsScore),
-      consultationScore: num(ts.consultationScore),
-      disputeScore: num(ts.disputeScore),
-    },
-    price: {
-      price,
-      consignPrice: num(pi.consignPrice),
-      priceUnderLine: num(pi.priceUnderLine),
-      priceType: str(pi.priceType),
-      quantityBegin: num(tq.quantityBegin),
-      unit: str(tq.unit) ?? str(tq.sellUnit),
-    },
-    images: Array.isArray(extend?.images)
-      ? extend.images.filter((u): u is string => typeof u === 'string' && !!u)
-      : [],
-    freight: {
-      free: typeof item.tradePrice?.freightPrice?.free === 'boolean'
-        ? item.tradePrice.freightPrice.free
-        : null,
-      cost: num(freightCost),
-    },
-    categoryId: info.categoryId !== undefined ? String(info.categoryId) : null,
-    brand: item.brand?.enable ? str(item.brand.name) : str(item.brand?.name),
-    attributes,
-    service: {
-      sevenDaysReturn: ts.sevenDaysReturn === true,
-      sevenDaysRefund: ts.sevenDaysRefund === true,
-      freightInsurance: ts.freightInsurance === true,
-      mixWholesale: ts.mixWholesale === true,
-      deliveryHours: num(ts.deliveryHours),
-    },
-    sameDesignCount: item.sameAndSimilarDesign?.sameDesign?.enable
-      ? num(item.sameAndSimilarDesign.sameDesign.count)
-      : null,
-    saleStats: extend?.saleStatsModel ?? null,
-    shopInfo: extend?.shopInfoModel ?? null,
-  };
-  if (opts.raw) block.raw = { item, extend: extend ?? null };
-
-  return {
-    offerId,
-    title,
-    price: {
-      text: priceText ? `¥${priceText}` : '',
-      min: price,
-      max: price,
-    },
-    supplier: {
-      name: str(company.name) ?? str(company.hoverName),
-      shopUrl: str(company.url),
-      years,
-    },
-    location: {
-      province: str(company.province),
-      city: str(company.city),
-    },
-    bizType: str(company.bizTypeName),
-    verified: {
-      factory: ts.factoryInspection === true,
-      business: ts.businessInspection === true,
-      superFactory: company.isSuperFactory === true,
-    },
-    tags,
-    demand: {
-      orderCountText: orderCount === null ? null : String(orderCount),
-      orderCount,
-      repurchaseRateText: str(company.shopRepurchaseRate),
-      repurchaseRate,
-    },
-    isP4P: false,
-    turnover: orderCount === null ? null : `${orderCount}${str(tq.unit) ?? ''}`,
-    url: `https://detail.1688.com/offer/${offerId}.html`,
-    image: str(item.image?.imgUrl),
-    plugin: block,
-  };
-}
-
-export function mapPluginPage(
-  page: PluginSearchPage,
-  opts: { raw?: boolean } = {},
-): PluginOffer[] {
-  const out: PluginOffer[] = [];
-  for (const item of page.offers) {
-    const id = item.id === undefined ? '' : String(item.id);
-    const mapped = mapPluginOffer(item, page.offerExtend[id], opts);
-    if (mapped) out.push(mapped);
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------

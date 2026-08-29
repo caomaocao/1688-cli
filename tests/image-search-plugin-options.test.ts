@@ -4,10 +4,11 @@ import path from 'node:path';
 import type { BrowserContext, Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CliError } from '../src/io/errors.js';
-import { parsePluginOptions, pluginSummaryLine } from '../src/commands/image-search.js';
+import { parseMax, parsePluginFlags, pluginSummaryLine } from '../src/commands/image-search.js';
 import {
   PLUGIN_PACE_JITTER_MS,
   PLUGIN_PACE_MIN_MS,
+  assertImageWithinCap,
   discardHostPage,
   execute,
   getHostPage,
@@ -15,11 +16,14 @@ import {
   mtopFailure,
   nextPluginCallDelay,
   runPluginSearch,
+  shouldDiscardHostPage,
   type MtopTransport,
 } from '../src/commands/image-search-plugin.js';
 import {
+  PLUGIN_HOST_PAGE_URL,
   PLUGIN_PAGE_SIZE,
   classifyMtopRet,
+  mtopChallengeUrl,
   normalizeRegion,
   type MtopEnvelope,
   type MtopRequestSpec,
@@ -27,24 +31,36 @@ import {
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'plugin-image-search', 'search-response.json');
 const IMAGE_ID = '1249708826795507246';
+const LOGIN_URL = 'https://login.1688.com/member/signin.htm';
+const PUNISH_URL = 'https://air.1688.com/_____tmd_____/punish?x5secdata=abc';
 
 let fixture: MtopEnvelope;
 let tmpDir: string;
 let imagePath: string;
+let previousHome: string | undefined;
 
 beforeAll(async () => {
   fixture = JSON.parse(await fs.readFile(FIXTURE, 'utf8')) as MtopEnvelope;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bb1688-plugin-opts-'));
   imagePath = path.join(tmpDir, 'img.jpg');
   await fs.writeFile(imagePath, Buffer.from('jpg-bytes'));
+  // Keep recovery artifacts out of the real ~/.1688.
+  previousHome = process.env.BB1688_HOME;
+  process.env.BB1688_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'bb1688-home-'));
 });
 
 afterAll(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
+  if (previousHome === undefined) delete process.env.BB1688_HOME;
+  else process.env.BB1688_HOME = previousHome;
 });
 
 function uploadOk(): MtopEnvelope {
   return { ret: ['SUCCESS::调用成功'], data: { imageId: IMAGE_ID } };
+}
+
+function risk(url?: string): MtopEnvelope {
+  return { ret: ['RGV587_ERROR::SM'], data: url ? { url } : {} };
 }
 
 function paramsOf(spec: MtopRequestSpec): Record<string, unknown> {
@@ -113,45 +129,44 @@ describe('normalizeRegion', () => {
   });
 });
 
-describe('parsePluginOptions', () => {
+describe('parsePluginFlags / parseMax', () => {
   it('rejects plugin-only flags under the page engine', () => {
-    expect(bad(() => parsePluginOptions('page', { region: '1,2,3,4' })).code).toBe('BAD_INPUT');
-    expect(bad(() => parsePluginOptions('page', { imageId: '1' })).code).toBe('BAD_INPUT');
-    expect(bad(() => parsePluginOptions('page', { raw: true })).code).toBe('BAD_INPUT');
-    expect(bad(() => parsePluginOptions('page', { region: '1,2,3,4' })).message).toContain('--region');
+    expect(bad(() => parsePluginFlags('page', { region: '1,2,3,4' })).code).toBe('BAD_INPUT');
+    expect(bad(() => parsePluginFlags('page', { imageId: '1' })).code).toBe('BAD_INPUT');
+    expect(bad(() => parsePluginFlags('page', { raw: true })).code).toBe('BAD_INPUT');
+    expect(bad(() => parsePluginFlags('page', { region: '1,2,3,4' })).message).toContain('--region');
   });
 
-  it('keeps the page engine max default at 20 and allows raw:false', () => {
-    expect(parsePluginOptions('page', { raw: false })).toEqual({
-      region: null,
-      imageId: null,
-      raw: false,
-      max: 20,
-    });
+  it('returns empty flags for the page engine and allows raw:false', () => {
+    expect(parsePluginFlags('page', { raw: false })).toEqual({ region: null, imageId: null, raw: false });
   });
 
   it('normalises region and image id for the plugin engine', () => {
-    expect(parsePluginOptions('plugin', { region: ' 31,262, 33,284', imageId: ' 42 ' })).toEqual({
+    expect(parsePluginFlags('plugin', { region: ' 31,262, 33,284', imageId: ' 42 ' })).toEqual({
       region: '31,262,33,284',
       imageId: '42',
       raw: false,
-      max: 40,
     });
   });
 
   it('rejects malformed region and non-numeric image id', () => {
-    expect(bad(() => parsePluginOptions('plugin', { region: '1,2,3' })).code).toBe('BAD_INPUT');
-    expect(bad(() => parsePluginOptions('plugin', { region: '9,1,1,2' })).code).toBe('BAD_INPUT');
-    expect(bad(() => parsePluginOptions('plugin', { imageId: 'abc' })).code).toBe('BAD_INPUT');
+    expect(bad(() => parsePluginFlags('plugin', { region: '1,2,3' })).code).toBe('BAD_INPUT');
+    expect(bad(() => parsePluginFlags('plugin', { region: '9,1,1,2' })).code).toBe('BAD_INPUT');
+    expect(bad(() => parsePluginFlags('plugin', { imageId: 'abc' })).code).toBe('BAD_INPUT');
   });
 
   // Ticket 03
-  it('defaults max to 40, caps at 200 and rejects junk', () => {
-    expect(parsePluginOptions('plugin', {}).max).toBe(40);
-    expect(parsePluginOptions('plugin', { max: '200' }).max).toBe(200);
-    expect(parsePluginOptions('plugin', { max: '1' }).max).toBe(1);
+  it('keeps the page engine max default at 20 and lenient', () => {
+    expect(parseMax('page', undefined)).toBe(20);
+    expect(parseMax('page', '7')).toBe(7);
+  });
+
+  it('defaults plugin max to 40, caps at 200 and rejects junk', () => {
+    expect(parseMax('plugin', undefined)).toBe(40);
+    expect(parseMax('plugin', '200')).toBe(200);
+    expect(parseMax('plugin', '1')).toBe(1);
     for (const max of ['201', '0', '-5', 'abc', '2.5']) {
-      expect(bad(() => parsePluginOptions('plugin', { max })).code).toBe('BAD_INPUT');
+      expect(bad(() => parseMax('plugin', max)).code).toBe('BAD_INPUT');
     }
   });
 });
@@ -185,6 +200,35 @@ describe('runPluginSearch with --region / --image-id', () => {
     const err = await runPluginSearch(transport, { max: 40 }).catch((e) => e as CliError);
     expect((err as CliError).code).toBe('BAD_INPUT');
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Story 18: base64 cap
+// ---------------------------------------------------------------------------
+
+describe('image size cap', () => {
+  it('rejects a file whose base64 would exceed 4 MB before any transport call', async () => {
+    const big = path.join(tmpDir, 'big.jpg');
+    await fs.writeFile(big, Buffer.alloc(3.2 * 1024 * 1024));
+    const err = await assertImageWithinCap(big).catch((e) => e as CliError);
+    expect((err as CliError).code).toBe('BAD_INPUT');
+    expect((err as CliError).message).toContain('too large');
+
+    const { transport, calls } = fakeTransport([uploadOk(), fixture]);
+    const err2 = await runPluginSearch(transport, { imagePath: big, max: 40 }).catch((e) => e as CliError);
+    expect((err2 as CliError).code).toBe('BAD_INPUT');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('accepts a small file and rejects an empty or missing one', async () => {
+    await expect(assertImageWithinCap(imagePath)).resolves.toBeUndefined();
+    const empty = path.join(tmpDir, 'empty.jpg');
+    await fs.writeFile(empty, Buffer.alloc(0));
+    await expect(assertImageWithinCap(empty)).rejects.toMatchObject({ code: 'BAD_INPUT' });
+    await expect(assertImageWithinCap(path.join(tmpDir, 'nope.jpg'))).rejects.toMatchObject({
+      code: 'BAD_INPUT',
+    });
   });
 });
 
@@ -289,12 +333,17 @@ describe('mtop ret classification and mapping', () => {
     expect(classifyMtopRet('')).toBe('upstream');
   });
 
-  it('maps risk control to exit 4 RISK_CONTROL with a --headed hint', () => {
+  it('maps risk control to exit 4 RISK_CONTROL with a --headed hint (and a headed variant)', () => {
     const err = mtopFailure('RGV587_ERROR::SM', 'search');
     expect(err.exitCode).toBe(4);
     expect(err.code).toBe('RISK_CONTROL');
     expect(err.details.ret).toBe('RGV587_ERROR::SM');
     expect(String(err.details.recoverHint)).toContain('--headed');
+    expect(err.message).toContain('Run once with `--headed`');
+
+    const headed = mtopFailure('RGV587_ERROR::SM', 'search', { headed: true });
+    expect(headed.code).toBe('RISK_CONTROL');
+    expect(headed.message).toContain('not solved in time');
   });
 
   it('maps session expiry to exit 3 NOT_LOGGED_IN and others to exit 9 UPSTREAM_ERROR', () => {
@@ -307,11 +356,77 @@ describe('mtop ret classification and mapping', () => {
     expect(other.details.ret).toBe('1006::系统开小差了，请稍候重试');
   });
 
+  it('discards the host page only for risk-control and login failures', () => {
+    expect(shouldDiscardHostPage('RISK_CONTROL')).toBe(true);
+    expect(shouldDiscardHostPage('NOT_LOGGED_IN')).toBe(true);
+    expect(shouldDiscardHostPage('UPSTREAM_ERROR')).toBe(false);
+    expect(shouldDiscardHostPage('BAD_INPUT')).toBe(false);
+  });
+
+  it('reads the challenge url from a risk envelope', () => {
+    expect(mtopChallengeUrl(risk(PUNISH_URL))).toBe(PUNISH_URL);
+    expect(mtopChallengeUrl(risk())).toBeNull();
+    expect(mtopChallengeUrl({ ret: ['RGV587_ERROR::SM'], data: { url: 'javascript:1' } })).toBeNull();
+  });
+
   it('does not issue further calls after a risk-control reply', async () => {
-    const { transport, calls } = fakeTransport([uploadOk(), { ret: ['RGV587_ERROR::SM'] }, fixture]);
+    const { transport, calls } = fakeTransport([uploadOk(), risk(), fixture]);
     const err = await runPluginSearch(transport, { imagePath, max: 80 }, { pageGap: async () => {} }).catch(
       (e) => e as CliError,
     );
+    expect((err as CliError).code).toBe('RISK_CONTROL');
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe('headed risk-control handling (runPluginSearch hooks)', () => {
+  it('retries the failed request once after the hook reports the challenge solved', async () => {
+    const { transport, calls } = fakeTransport([uploadOk(), risk(PUNISH_URL), fixture]);
+    const seen: Array<{ url: string | null; stage: string }> = [];
+    const result = await runPluginSearch(
+      transport,
+      { imagePath, max: 40 },
+      {
+        headed: true,
+        onRiskControl: async (env, stage) => {
+          seen.push({ url: mtopChallengeUrl(env), stage });
+          return true;
+        },
+      },
+    );
+    expect(seen).toEqual([{ url: PUNISH_URL, stage: 'search' }]);
+    expect(calls).toHaveLength(3);
+    expect(calls[1]!.api).toBe(calls[2]!.api);
+    expect(result.offers).toHaveLength(3);
+  });
+
+  it('retries exactly once: a second risk reply fails with the headed RISK_CONTROL variant', async () => {
+    const { transport, calls } = fakeTransport([uploadOk(), risk(), risk(), fixture]);
+    let hookCalls = 0;
+    const err = await runPluginSearch(
+      transport,
+      { imagePath, max: 40 },
+      {
+        headed: true,
+        onRiskControl: async () => {
+          hookCalls++;
+          return true;
+        },
+      },
+    ).catch((e) => e as CliError);
+    expect((err as CliError).code).toBe('RISK_CONTROL');
+    expect((err as CliError).message).toContain('not solved in time');
+    expect(hookCalls).toBe(1);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('fails immediately when the hook gives up', async () => {
+    const { transport, calls } = fakeTransport([uploadOk(), risk(), fixture]);
+    const err = await runPluginSearch(
+      transport,
+      { imagePath, max: 40 },
+      { headed: true, onRiskControl: async () => false },
+    ).catch((e) => e as CliError);
     expect((err as CliError).code).toBe('RISK_CONTROL');
     expect(calls).toHaveLength(2);
   });
@@ -328,27 +443,47 @@ describe('pacing', () => {
   });
 });
 
-// A fake browser context / page pair good enough for the host-page cache
-// and the recovery wrapper. `evaluate` answers the mtop health probe with
-// `true` (no argument) and mtop requests from a queue (with argument).
-function fakeBrowser(answers: MtopEnvelope[]) {
-  const queue = [...answers];
+// A fake browser context / page pair good enough for the host-page cache,
+// the headed flow and the recovery wrapper. `evaluate` answers the mtop
+// readiness probe with `true`, the page-text probe with '', and mtop
+// requests (called with an argument) from a queue. `url` can change over
+// time to simulate login / punish redirects.
+interface FakeBrowserOpts {
+  answers: MtopEnvelope[];
+  urls?: string[]; // returned by url() in order; the last one repeats
+}
+
+function fakeBrowser(opts: FakeBrowserOpts) {
+  const queue = [...opts.answers];
+  const urls = opts.urls ?? [PLUGIN_HOST_PAGE_URL];
+  let urlIdx = 0;
   let created = 0;
   const pages: Page[] = [];
+  const gotos: string[] = [];
   const makePage = (): Page => {
     created++;
     let closed = false;
     const page = {
       isClosed: () => closed,
-      url: () => 'https://air.1688.com/kapp/innovateHub/extension-offer-search/imageSearch',
+      url: () => urls[Math.min(urlIdx, urls.length - 1)]!,
       title: async () => '',
-      goto: async () => null,
+      goto: async (u: string) => {
+        gotos.push(u);
+        urlIdx++;
+        return null;
+      },
+      reload: async () => {
+        urlIdx++;
+        return null;
+      },
       waitForFunction: async () => null,
-      evaluate: async (_fn: unknown, arg?: unknown) => {
-        if (arg === undefined) return true;
-        const next = queue.shift();
-        if (!next) throw new Error('no answer queued');
-        return next;
+      evaluate: async (fn: unknown, arg?: unknown) => {
+        if (arg !== undefined) {
+          const next = queue.shift();
+          if (!next) throw new Error('no answer queued');
+          return next;
+        }
+        return /lib/.test(String(fn)) ? true : '';
       },
       close: async () => {
         closed = true;
@@ -367,12 +502,12 @@ function fakeBrowser(answers: MtopEnvelope[]) {
     off: () => ctx,
     removeListener: () => ctx,
   } as unknown as BrowserContext;
-  return { ctx, created: () => created, pages };
+  return { ctx, created: () => created, pages, gotos };
 }
 
 describe('host page cache', () => {
   it('reuses a healthy page and rebuilds after discard', async () => {
-    const b = fakeBrowser([]);
+    const b = fakeBrowser({ answers: [] });
     const p1 = await getHostPage(b.ctx);
     const p2 = await getHostPage(b.ctx);
     expect(p2).toBe(p1);
@@ -384,25 +519,70 @@ describe('host page cache', () => {
     expect(b.created()).toBe(2);
   });
 
-  it('execute discards the host page after RISK_CONTROL and keeps it after success', async () => {
-    const previousHome = process.env.BB1688_HOME;
-    process.env.BB1688_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'bb1688-home-'));
-    try {
-      const ok = fakeBrowser([uploadOk(), fixture]);
-      await execute(ok.ctx, { imagePath, max: 40 });
-      expect(ok.pages[0]!.isClosed()).toBe(false);
+  it('reports NOT_LOGGED_IN when the host page lands on a login URL', async () => {
+    // First url() is what goto lands on.
+    const b = fakeBrowser({ answers: [], urls: [LOGIN_URL] });
+    const err = await getHostPage(b.ctx).catch((e) => e as CliError);
+    expect((err as CliError).code).toBe('NOT_LOGGED_IN');
+    expect((err as CliError).exitCode).toBe(3);
+    expect(b.pages[0]!.isClosed()).toBe(true);
+  });
 
-      // Reset the pacer so the second call does not sleep 3–6 s in the test.
-      markPluginCallEnded(0);
-      const risky = fakeBrowser([uploadOk(), { ret: ['RGV587_ERROR::SM'] }]);
-      const err = await execute(risky.ctx, { imagePath, max: 40 }).catch((e) => e as CliError);
-      expect((err as CliError).code).toBe('RISK_CONTROL');
-      expect((err as CliError).exitCode).toBe(4);
-      expect(risky.pages[0]!.isClosed()).toBe(true);
-      expect(risky.created()).toBe(1); // no retry, no rebuild within the call
-    } finally {
-      if (previousHome === undefined) delete process.env.BB1688_HOME;
-      else process.env.BB1688_HOME = previousHome;
-    }
+  it('reports RISK_CONTROL (not NETWORK_ERROR) when the host page lands on a punish URL', async () => {
+    const b = fakeBrowser({ answers: [], urls: [PUNISH_URL] });
+    const err = await getHostPage(b.ctx).catch((e) => e as CliError);
+    expect((err as CliError).code).toBe('RISK_CONTROL');
+    expect((err as CliError).exitCode).toBe(4);
+    expect((err as CliError).details.stage).toBe('host-page');
+  });
+
+  it('execute keeps the page after success and discards it after RISK_CONTROL / NOT_LOGGED_IN', async () => {
+    markPluginCallEnded(0);
+    const ok = fakeBrowser({ answers: [uploadOk(), fixture] });
+    await execute(ok.ctx, { imagePath, max: 40 });
+    expect(ok.pages[0]!.isClosed()).toBe(false);
+
+    markPluginCallEnded(0);
+    const risky = fakeBrowser({ answers: [uploadOk(), risk(), uploadOk(), fixture] });
+    const err = await execute(risky.ctx, { imagePath, max: 40 }).catch((e) => e as CliError);
+    expect((err as CliError).code).toBe('RISK_CONTROL');
+    expect((err as CliError).exitCode).toBe(4);
+    expect(risky.pages[0]!.isClosed()).toBe(true);
+    expect(risky.created()).toBe(1); // no retry, no rebuild within the call
+    // Next call rebuilds the page.
+    markPluginCallEnded(0);
+    await execute(risky.ctx, { imagePath, max: 40 });
+    expect(risky.created()).toBe(2);
+
+    markPluginCallEnded(0);
+    const expired = fakeBrowser({ answers: [{ ret: ['FAIL_SYS_SESSION_EXPIRED::x'] }] });
+    const err2 = await execute(expired.ctx, { imagePath, max: 40 }).catch((e) => e as CliError);
+    expect((err2 as CliError).code).toBe('NOT_LOGGED_IN');
+    expect(expired.pages[0]!.isClosed()).toBe(true);
+  }, 30_000);
+
+  it('execute --headed uses a fresh visible page per call and closes it afterwards', async () => {
+    markPluginCallEnded(0);
+    const b = fakeBrowser({ answers: [uploadOk(), fixture, uploadOk(), fixture] });
+    await execute(b.ctx, { imagePath, max: 40, headed: true });
+    expect(b.created()).toBe(1);
+    expect(b.pages[0]!.isClosed()).toBe(true);
+    markPluginCallEnded(0);
+    await execute(b.ctx, { imagePath, max: 40, headed: true });
+    expect(b.created()).toBe(2);
+    expect(b.pages[1]!.isClosed()).toBe(true);
+  }, 30_000);
+
+  it('execute --headed opens the challenge, waits for the user and retries once', async () => {
+    markPluginCallEnded(0);
+    // url sequence: host page → (goto punish) punish → (goto host) host
+    const b = fakeBrowser({
+      answers: [uploadOk(), risk(PUNISH_URL), fixture],
+      urls: [PLUGIN_HOST_PAGE_URL, PLUGIN_HOST_PAGE_URL, PLUGIN_HOST_PAGE_URL],
+    });
+    const result = await execute(b.ctx, { imagePath, max: 40, headed: true });
+    expect(result.offers).toHaveLength(3);
+    expect(b.gotos).toEqual([PLUGIN_HOST_PAGE_URL, PUNISH_URL, PLUGIN_HOST_PAGE_URL]);
+    expect(b.pages[0]!.isClosed()).toBe(true);
   }, 30_000);
 });
