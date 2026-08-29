@@ -163,8 +163,18 @@ supplier
 program
   .command('image-search')
   .description('Search 1688 by image (local file or http(s) URL)')
-  .argument('<imagePathOrUrl>', 'Local file path OR http(s) image URL')
-  .option('--max <n>', 'Maximum number of results', '20')
+  .argument('[imagePathOrUrl]', 'Local file path OR http(s) image URL (optional with --image-id)')
+  .option('--max <n>', 'Maximum number of results (default: 20; 40 with --engine plugin, cap 200)')
+  .option(
+    '--engine <name>',
+    'page (default): scrape the 1688 image-search pages; plugin: official 采购助手 extension API (40/page, richer fields)',
+  )
+  .option(
+    '--region <x1,x2,y1,y2>',
+    '[plugin] subject box in pixels of the uploaded image, 1688 native order (both x, then both y)',
+  )
+  .option('--image-id <id>', '[plugin] reuse an earlier upload instead of uploading again')
+  .option('--raw', '[plugin] attach the untouched server item to each offer (plugin.raw)')
   .option('--profile <name>', 'Profile name (default: default)')
   .option('--headed', 'Open a window (fallback for risk control)')
   .action(async (imagePath, opts) => {

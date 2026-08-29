@@ -32,3 +32,6 @@ scripts/check-chat.mjs
 !.env.example
 *.pem
 *.key
+
+# local agent tickets / scratch
+.scratch/

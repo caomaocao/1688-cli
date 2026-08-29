@@ -5,6 +5,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `image-search --engine plugin`: a second engine that drives the same 1688
+  image-search backend through the two mtop calls used by the official
+  "1688官方采购助手" extension's 找同款 drawer (`imageBase64ToImageId` +
+  `imageExtraSearchService` v1.0), running on one cached hidden host page in
+  the daemon instead of two page loads per search. It adds `--region
+  x1,x2,y1,y2` (subject box, 1688 native order, pixels of the uploaded file),
+  `--image-id` (reuse an upload), `--raw`, 40-per-page pagination via `--max`
+  (default 40, cap 200), and a per-offer `plugin` block with 30-day orders,
+  90/360-day sales, GMV, shop credit / capital / repurchase / age, service
+  scores, extra images, freight and attributes; the response also carries the
+  `region` 1688 used and its `yoloCropRegion` candidates. The default `page`
+  engine is unchanged. mtop risk-control / session replies map to the usual
+  `RISK_CONTROL` (4) / `NOT_LOGGED_IN` (3), other failures to
+  `UPSTREAM_ERROR` (9) with the original code; no automatic retry, ≥ 3 s
+  pacing between plugin calls
+  (`src/commands/image-search-plugin.ts`, `src/session/plugin-image-search.ts`,
+  `tests/image-search-plugin*.test.ts`, `tests/image-search-engine-switch.test.ts`).
+
 ## [0.1.48] - 2026-08-28
 
 ### Fixed

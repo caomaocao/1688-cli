@@ -36,6 +36,16 @@ place orders. Treat write actions as explicit user-authorized operations.
   `--headed`.
 - The user must solve the slider manually.
 - Do not silently retry the same blocked command.
+- `image-search --engine plugin` talks to 1688 through mtop calls instead of
+  pages. A risk-control reply there (`RGV587_ERROR…`, `FAIL_SYS_USER_VALIDATE`)
+  is reported with the same exit code `4` / `RISK_CONTROL`; a session-expired
+  reply (`FAIL_SYS_SESSION_EXPIRED`, `FAIL_SYS_ILLEGAL_ACCESS`,
+  `FAIL_SYS_TOKEN_*`) as exit `3` / `NOT_LOGGED_IN`; any other non-success
+  code as exit `9` / `UPSTREAM_ERROR` with the original code in
+  `details.ret`. None of these are retried automatically, and the engine
+  discards its cached host page so the next call starts clean. The engine also
+  paces itself (≥ 3 s + jitter between plugin calls) on top of the daemon
+  throttle; do not wrap it in tight retry loops.
 
 ## Seller Contact
 

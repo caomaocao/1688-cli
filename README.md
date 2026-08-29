@@ -105,7 +105,7 @@ npm i -g 1688-cli
 | `1688 supplier inspect <target>` | Supplier identity, factory card, trust signals |
 | `1688 supplier search <keywords...>` | Company-search supplier discovery |
 | `1688 supplier research <keywords...>` | Scored supplier dataset with inspect enrichment |
-| `1688 image-search <path\|url>` | Search by local image or http(s) URL |
+| `1688 image-search <path\|url>` | Search by local image or http(s) URL; `--engine plugin` adds subject box, paging, rich fields |
 | `1688 offer <offerIds...>` | Single or batch product detail (SKUs, package, images) |
 | `1688 similar <offerId>` | Find similar / 找同款 offers (official entry point) |
 | `1688 inbox` | List recent 旺旺 IM conversations |
@@ -154,6 +154,7 @@ Research** when you start from companies, factories, or supplier qualification.
 1688 research 手机壳 数据线 --max-per-query 50 --enrich top:5 --csv
 1688 image-search ./shoe.jpg                     # search by local image
 1688 image-search https://.../img.png            # search by http(s) URL
+1688 image-search ./kit.jpg --engine plugin --region 31,262,33,284 --max 80   # official-extension API: subject box, 40/page, sales+shop fields
 1688 offer 628196518518                          # single product detail (priceTiers, attributes, packageInfo, SKUs)
 1688 offer 628196518518 1234567890 --pro --json  # batch product detail, bypass daemon
 1688 compare 628196518518 1234567890             # compare price/MOQ/SKU/sales signals

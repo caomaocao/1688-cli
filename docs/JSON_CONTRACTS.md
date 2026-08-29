@@ -142,6 +142,58 @@ the matching profile-scoped daemon status.
 }
 ```
 
+`image-search --engine plugin` keeps `imageId`, `total` and the `offers[]`
+shape above (mapped from the extension's offer items; `isP4P` is always
+`false` there because that feed carries no ad flag) and adds:
+
+```ts
+{
+  engine: "plugin",
+  region: string | null,        // box 1688 used, native "x1,x2,y1,y2" (pixels of the uploaded file)
+  yoloCropRegion: string[],     // 1688's candidate subject boxes, same format
+  pagesFetched: number,         // 40 offers per page; total = server totalCount
+  offers: Array<Offer & {
+    plugin: {
+      stats: {
+        saleQuantity: number | null, bookedCount: number | null,
+        payOrderCount30d: number | null, payItemCount30d: number | null,
+        quantitySumMonth: number | null, buyerCount: number | null,
+        sales90: number | null, sales360: number | null, gmv: number | null,
+        repurchaseRate: number | null,   // offer-level, percent
+        inquiryUv: number | null, evaluateCount: number | null,
+      },
+      shop: {
+        memberId: string | null, loginId: string | null, url: string | null,
+        creditLevel: number | null, creditLevelText: string | null,
+        regCapital: string | null,       // e.g. "100万"
+        shopRepurchaseRate: number | null, // percent
+        tpYear: number | null, isFactory: boolean, goldSupplier: boolean,
+        compositeScore: number | null, goodsScore: number | null,
+        logisticsScore: number | null, consultationScore: number | null,
+        disputeScore: number | null,
+      },
+      price: {
+        price: number | null, consignPrice: number | null, priceUnderLine: number | null,
+        priceType: string | null, quantityBegin: number | null, unit: string | null,
+      },
+      images: string[],                  // up to 5 extra offer images
+      freight: { free: boolean | null, cost: number | null },
+      categoryId: string | null,
+      brand: string | null,
+      attributes: Record<string, string>,
+      service: {
+        sevenDaysReturn: boolean, sevenDaysRefund: boolean, freightInsurance: boolean,
+        mixWholesale: boolean, deliveryHours: number | null,
+      },
+      sameDesignCount: number | null,
+      saleStats: object | null,          // server saleStatsModel passthrough
+      shopInfo: object | null,           // server shopInfoModel passthrough
+      raw?: { item: object, extend: object | null },  // only with --raw
+    },
+  }>,
+}
+```
+
 `search --deeppro` keeps the normal `search` fields and adds:
 
 ```ts

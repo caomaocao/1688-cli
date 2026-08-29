@@ -11,25 +11,70 @@ import {
   clickImageUploadButton,
 } from '../session/image-search-locators.js';
 import { captureSearchOffersForAction } from '../session/search-capture.js';
+import {
+  PLUGIN_DEFAULT_MAX,
+  PLUGIN_MAX_RESULTS,
+  normalizeRegion,
+} from '../session/plugin-image-search.js';
 import { type Offer } from './search.js';
 
+export type ImageSearchEngine = 'page' | 'plugin';
+export const IMAGE_SEARCH_ENGINES: readonly ImageSearchEngine[] = ['page', 'plugin'];
+
 export interface ImageSearchOpts {
-  imagePath: string;
+  imagePath?: string;
   max?: string;
   profile?: string;
   headed?: boolean;
+  engine?: string;
+  // --engine plugin only:
+  region?: string;
+  imageId?: string;
+  raw?: boolean;
 }
 
 export interface ImageSearchArgs {
   imagePath: string;
   max: number;
   headed?: boolean;
+  // `page` (default) scrapes the upload + results pages; `plugin` drives the
+  // official 采购助手 extension's mtop calls. See image-search-plugin.ts.
+  engine?: ImageSearchEngine;
+  // --engine plugin only. `region` is 1688's native "x1,x2,y1,y2" (pixels of
+  // the uploaded file); `imageId` reuses an earlier upload (imagePath is then
+  // empty); `raw` attaches the untouched server item to each offer.
+  region?: string | null;
+  imageId?: string | null;
+  raw?: boolean;
 }
+
+const PLUGIN_ONLY_FLAGS: ReadonlyArray<[keyof ImageSearchOpts, string]> = [
+  ['region', '--region'],
+  ['imageId', '--image-id'],
+  ['raw', '--raw'],
+];
 
 export interface ImageSearchResult {
   imageId: string;
   total: number;
   offers: Offer[];
+  // Present only for `--engine plugin`.
+  engine?: ImageSearchEngine;
+  region?: string | null;
+  yoloCropRegion?: string[];
+  pagesFetched?: number;
+}
+
+export function parseEngine(raw: string | undefined): ImageSearchEngine {
+  const value = (raw ?? 'page').trim().toLowerCase();
+  if ((IMAGE_SEARCH_ENGINES as readonly string[]).includes(value)) {
+    return value as ImageSearchEngine;
+  }
+  throw new CliError(
+    2,
+    'BAD_INPUT',
+    `Unknown --engine "${raw}". Use one of: ${IMAGE_SEARCH_ENGINES.join(', ')}.`,
+  );
 }
 
 // Upload entry point. 1688 currently redirects this to the pc-image-search app
@@ -71,11 +116,20 @@ export async function execute(
   ctx: BrowserContext,
   args: ImageSearchArgs,
 ): Promise<ImageSearchResult> {
-  try {
-    await fs.access(args.imagePath, fs.constants.R_OK);
-  } catch {
-    throw new CliError(2, 'BAD_INPUT', `Cannot read image: ${args.imagePath}`);
+  if (args.engine === 'plugin') {
+    if (args.imagePath && !args.imageId) await assertReadable(args.imagePath);
+    const { execute: executePlugin } = await import('./image-search-plugin.js');
+    return executePlugin(ctx, {
+      imagePath: args.imagePath || null,
+      imageId: args.imageId ?? null,
+      region: args.region ?? null,
+      max: args.max,
+      raw: args.raw === true,
+      headed: args.headed,
+    });
   }
+
+  await assertReadable(args.imagePath);
 
   return withRecovery(
     ctx,
@@ -83,6 +137,14 @@ export async function execute(
     () => executeImageSearch(ctx, args),
     { headed: args.headed === true, maxRetries: 1 },
   );
+}
+
+async function assertReadable(imagePath: string): Promise<void> {
+  try {
+    await fs.access(imagePath, fs.constants.R_OK);
+  } catch {
+    throw new CliError(2, 'BAD_INPUT', `Cannot read image: ${imagePath}`);
+  }
 }
 
 async function executeImageSearch(
@@ -186,27 +248,100 @@ async function searchByImageId(
   }
 }
 
-export async function run(opts: ImageSearchOpts): Promise<void> {
-  if (!opts.imagePath) {
-    throw new CliError(2, 'BAD_INPUT', 'Image path or URL required.');
+// Validates the plugin-engine flags. Exported for tests.
+export function parsePluginOptions(
+  engine: ImageSearchEngine,
+  opts: ImageSearchOpts,
+): { region: string | null; imageId: string | null; raw: boolean; max: number } {
+  if (engine !== 'plugin') {
+    for (const [key, flag] of PLUGIN_ONLY_FLAGS) {
+      if (opts[key] !== undefined && opts[key] !== false) {
+        throw new CliError(
+          2,
+          'BAD_INPUT',
+          `${flag} requires --engine plugin.`,
+        );
+      }
+    }
+    return { region: null, imageId: null, raw: false, max: Math.max(1, parseInt(opts.max ?? '20', 10)) };
   }
-  const max = Math.max(1, parseInt(opts.max ?? '20', 10));
 
-  let abs: string;
+  let region: string | null = null;
+  if (opts.region !== undefined) {
+    region = normalizeRegion(opts.region);
+    if (!region) {
+      throw new CliError(
+        2,
+        'BAD_INPUT',
+        `Invalid --region "${opts.region}". Expected 1688's native "x1,x2,y1,y2" (integers, x2 > x1, y2 > y1, pixels of the uploaded image).`,
+      );
+    }
+  }
+
+  let imageId: string | null = null;
+  if (opts.imageId !== undefined) {
+    const id = opts.imageId.trim();
+    if (!/^\d+$/.test(id)) {
+      throw new CliError(2, 'BAD_INPUT', `Invalid --image-id "${opts.imageId}": expected digits.`);
+    }
+    imageId = id;
+  }
+
+  // One full server page by default; hard cap so a typo cannot fan out into
+  // dozens of requests.
+  const maxRaw = opts.max ?? String(PLUGIN_DEFAULT_MAX);
+  const max = /^\d+$/.test(maxRaw.trim()) ? Number(maxRaw.trim()) : NaN;
+  if (!Number.isInteger(max) || max < 1 || max > PLUGIN_MAX_RESULTS) {
+    throw new CliError(
+      2,
+      'BAD_INPUT',
+      `--max must be an integer between 1 and ${PLUGIN_MAX_RESULTS} with --engine plugin (got "${maxRaw}").`,
+    );
+  }
+
+  return { region, imageId, raw: opts.raw === true, max };
+}
+
+export async function run(opts: ImageSearchOpts): Promise<void> {
+  const engine = parseEngine(opts.engine);
+  const plugin = parsePluginOptions(engine, opts);
+  if (!opts.imagePath && !plugin.imageId) {
+    throw new CliError(
+      2,
+      'BAD_INPUT',
+      engine === 'plugin'
+        ? 'Image path or URL required (or --image-id to reuse an upload).'
+        : 'Image path or URL required.',
+    );
+  }
+  const max = plugin.max;
+
+  let abs = '';
   let cleanup: (() => Promise<void>) | null = null;
-  if (/^https?:\/\//i.test(opts.imagePath)) {
-    info(`Downloading image from URL...`);
-    const t = await downloadToTemp(opts.imagePath);
-    abs = t.path;
-    cleanup = t.cleanup;
-  } else {
-    abs = path.resolve(opts.imagePath);
+  // With --image-id the file is not uploaded, so it is not even read.
+  if (opts.imagePath && !plugin.imageId) {
+    if (/^https?:\/\//i.test(opts.imagePath)) {
+      info(`Downloading image from URL...`);
+      const t = await downloadToTemp(opts.imagePath);
+      abs = t.path;
+      cleanup = t.cleanup;
+    } else {
+      abs = path.resolve(opts.imagePath);
+    }
   }
 
   try {
     const data = await dispatch<ImageSearchArgs, ImageSearchResult>(
       'image-search',
-      { imagePath: abs, max, headed: opts.headed },
+      {
+        imagePath: abs,
+        max,
+        headed: opts.headed,
+        engine,
+        ...(engine === 'plugin'
+          ? { region: plugin.region, imageId: plugin.imageId, raw: plugin.raw }
+          : {}),
+      },
       { headed: opts.headed, profile: opts.profile },
     );
     emit({
@@ -276,12 +411,29 @@ function guessExt(url: string, contentType: string | null): string {
   return '.jpg';
 }
 
+// Extra line for `--engine plugin` results: 30-day orders · repurchase · shop
+// years. Exported for tests; returns '' for page-engine offers.
+export function pluginSummaryLine(o: Offer): string {
+  const plugin = (o as Offer & { plugin?: { stats?: { payOrderCount30d?: number | null }; shop?: { shopRepurchaseRate?: number | null; tpYear?: number | null } } }).plugin;
+  if (!plugin) return '';
+  const bits = [
+    plugin.stats?.payOrderCount30d != null ? `30d单量 ${plugin.stats.payOrderCount30d}` : null,
+    plugin.shop?.shopRepurchaseRate != null ? `复购 ${plugin.shop.shopRepurchaseRate}%` : null,
+    plugin.shop?.tpYear != null ? `店龄 ${plugin.shop.tpYear}年` : null,
+  ].filter(Boolean);
+  return bits.join(' · ');
+}
+
 function printResults(r: ImageSearchResult): void {
   if (r.offers.length === 0) {
     process.stdout.write(`No offers found (imageId=${r.imageId}).\n`);
     return;
   }
-  process.stdout.write(`Image search (imageId=${r.imageId}):\n\n`);
+  const header =
+    r.engine === 'plugin'
+      ? `Image search [plugin engine] (imageId=${r.imageId}, total≈${r.total}, region=${r.region ?? 'auto'}, pages=${r.pagesFetched ?? 1}):\n\n`
+      : `Image search (imageId=${r.imageId}):\n\n`;
+  process.stdout.write(header);
   const w = String(r.offers.length).length;
   r.offers.forEach((o, i) => {
     const idx = String(i + 1).padStart(w, ' ');
@@ -298,6 +450,8 @@ function printResults(r: ImageSearchResult): void {
       .filter(Boolean)
       .join(' · ');
     if (supplierBits) process.stdout.write(`${pad}${supplierBits}\n`);
+    const pluginLine = pluginSummaryLine(o);
+    if (pluginLine) process.stdout.write(`${pad}${pluginLine}\n`);
     process.stdout.write(`${pad}${o.url}\n`);
     if (i < r.offers.length - 1) process.stdout.write('\n');
   });

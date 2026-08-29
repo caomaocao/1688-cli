@@ -13,6 +13,8 @@ checkout -> tracking -> post-sale.
 1688 research <keyword...>        # multi-keyword research, scoring, export
 1688 similar <offerId>            # official 1688 same-product entry point; currently may be unavailable
 1688 image-search <pathOrUrl>     # local .jpg/.png/.webp or http(s) URL
+1688 image-search <pathOrUrl> --engine plugin --region x1,x2,y1,y2   # subject box, 40/page, rich fields
+1688 image-search --engine plugin --image-id <id> --max 80           # reuse an upload, page deeper
 1688 offer <offerId>              # product detail, SKUs, price tiers, package info
 1688 offer <offerId...> --pro     # batch details, bypassing daemon health pause
 1688 compare <offerId...>         # compare offer details for sourcing
@@ -50,6 +52,34 @@ daemon bypass so a paused daemon does not block the deep collection chain.
 --csv
 --output <file>
 ```
+
+`image-search` has two engines:
+
+```bash
+--engine page|plugin        # default: page
+--region <x1,x2,y1,y2>      # plugin only: subject box, 1688 native order (both x, then both y),
+                            # pixels of the uploaded file (the engine never resizes)
+--image-id <id>             # plugin only: reuse an earlier upload (positional image becomes optional)
+--raw                       # plugin only: attach the untouched server item as plugin.raw
+--max <n>                   # page: default 20; plugin: default 40, cap 200, fetched 40/page
+```
+
+`page` drives the upload and results pages in the browser and needs nothing
+else. `plugin` calls the same 1688 image-search backend through the two mtop
+requests used by the official "1688官方采购助手" extension's 找同款 drawer
+(`imageBase64ToImageId` + `imageExtraSearchService`, v1.0 without the
+extension token). Use it when you need to choose the subject box, page deeper
+than the first screen, rank on sales / repurchase / shop signals without one
+`offer` call per candidate, or keep the request footprint small (two mtop
+calls instead of two page loads). The server always returns 40 per page and
+the request is sent exactly as the extension sends it; `--max` only decides
+how many pages are fetched and where the list is cut. Every plugin response
+carries `region` (the box 1688 used) and `yoloCropRegion` (1688's candidate
+boxes) so a caller can search once without `--region`, pick a box, then
+re-search with `--image-id` + `--region`. The plugin-only flags fail with
+`BAD_INPUT` under the page engine. Risk-control and login failures map to the
+usual exit codes 4 / 3 (see `docs/SAFETY.md`); the engine paces itself ≥ 3 s
+between calls.
 
 `similar` only returns results from 1688's official same-product page. It does
 not fall back to keyword search or image search, because those are broader
