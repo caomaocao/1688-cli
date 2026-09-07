@@ -48,4 +48,14 @@ describe('classifyPageState', () => {
     });
     expect(state.kind).toBe('normal_1688_page');
   });
+
+  it('detects the English challenge page 1688 serves on offer pages (title only, empty body)', () => {
+    const state = classifyPageState({
+      url: 'https://detail.1688.com/offer/669799826076.html',
+      title: 'CAPTCHA Verification',
+      text: '',
+    });
+    expect(state.kind).toBe('risk_challenge');
+    expect(state.indicators).toContain('risk-text');
+  });
 });

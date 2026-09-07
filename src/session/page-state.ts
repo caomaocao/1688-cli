@@ -24,7 +24,7 @@ export interface PageSnapshot {
 const LOGIN_RE = /(?:login\.(?:1688|taobao)\.com|passport\.1688\.com)/i;
 const RISK_URL_RE = /(?:\/punish\b|x5secdata)/i;
 const RISK_TEXT_RE =
-  /(滑块|拖动.*验证|安全验证|验证码|验证一下|检测到.*异常|环境异常|nc[_-]?captcha|请完成验证)/i;
+  /(滑块|拖动.*验证|安全验证|验证码|验证一下|检测到.*异常|环境异常|nc[_-]?captcha|请完成验证|captcha|slide to verify|verify (?:you are|that you're) human)/i;
 const RATE_LIMIT_TEXT_RE =
   /(访问频繁|请求频繁|操作频繁|稍后再试|访问受限|流量异常|系统繁忙)/i;
 const PAGE_PROBE_TIMEOUT_MS = 1500;

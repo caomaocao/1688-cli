@@ -4,6 +4,7 @@ import { emit, info } from '../io/output.js';
 import { CliError } from '../io/errors.js';
 import { withRecovery } from '../session/recovery.js';
 import { sleep } from '../session/wait.js';
+import { detectPageState, recoverHintForPageState } from '../session/page-state.js';
 import { parseMtop } from '../session/mtop.js';
 import { startResponseCapture } from '../session/response-capture.js';
 import { debugTmpPath } from '../util/temp.js';
@@ -131,19 +132,85 @@ export async function execute(
   if (!/^\d+$/.test(args.offerId)) {
     throw new CliError(2, 'BAD_INPUT', `Invalid offerId: ${args.offerId}`);
   }
-  return withRecovery(
-    ctx,
-    { cmd: 'offer', args },
-    () => executeRaw(ctx, args),
-    { headed: args.headed === true, maxRetries: 1 },
+  const opened: Page[] = [];
+  try {
+    return await withRecovery(
+      ctx,
+      { cmd: 'offer', args },
+      () => executeRaw(ctx, args, opened),
+      { headed: args.headed === true, maxRetries: 1 },
+    );
+  } finally {
+    // A failed attempt leaves its page open so the recovery can read its page state and take the
+    // screenshot; close it here, after that look. Successful attempts close their own page.
+    await Promise.all(
+      opened.filter((p) => !p.isClosed()).map((p) => p.close().catch(() => {})),
+    );
+  }
+}
+
+const CHALLENGE_POLL_MS = 1000;
+const CHALLENGE_SOLVE_TIMEOUT_MS = 180000;
+
+/**
+ * The offer page can land on Aliyun's slider page ("CAPTCHA Verification"): the SSR context is
+ * missing, every mtop call is blocked, and the DOM fallback would happily hand back the
+ * challenge's <title> as the product title with an otherwise empty offer. Headless that is a
+ * RISK_CONTROL failure (exit 4, like the plugin engine); with `--headed` the user gets time to
+ * solve it in the visible window. Returns true when a challenge was solved (the page has reloaded).
+ */
+async function ensureNotChallenged(page: Page, headed: boolean): Promise<boolean> {
+  const state = await detectPageState(page).catch(() => null);
+  if (!state || state.kind !== 'risk_challenge') return false;
+  if (!headed) {
+    throw new CliError(
+      4,
+      'RISK_CONTROL',
+      'Aliyun risk control triggered on the offer page. Run once with `--headed` to solve it manually.',
+      {
+        category: 'risk_challenge',
+        pageState: state.kind,
+        currentUrl: state.url,
+        recoverHint: recoverHintForPageState(state.kind),
+      },
+    );
+  }
+  info('1688 is showing a verification challenge. Solve it in the browser window...');
+  const deadline = Date.now() + CHALLENGE_SOLVE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (page.isClosed()) throw new CliError(130, 'CANCELED', 'Browser closed.');
+    const kind = (await detectPageState(page).catch(() => null))?.kind ?? 'unknown';
+    if (kind === 'not_logged_in') {
+      throw new CliError(3, 'NOT_LOGGED_IN', 'Session expired. Run `1688 login`.');
+    }
+    if (kind === 'normal_1688_page') {
+      info('Verification solved. Continuing...');
+      return true;
+    }
+    await sleep(CHALLENGE_POLL_MS);
+  }
+  throw new CliError(
+    4,
+    'RISK_CONTROL',
+    'Slider verification not solved in time. Try again with `--headed`.',
+    { category: 'risk_challenge', pageState: 'risk_challenge', currentUrl: page.url() },
   );
 }
 
+/**
+ * `opened` collects the page this attempt creates so `execute` can close it after a failure.
+ * Every offer call used to leave its page open for the life of the daemon: the page count grew by
+ * one per call (60+ after one evening of the sourcing worker) until 1688 started serving its
+ * slider page instead of the offer.
+ */
 export async function executeRaw(
   ctx: BrowserContext,
   args: OfferArgs,
+  opened?: Page[],
 ): Promise<OfferResult> {
   const page = await ctx.newPage();
+  opened?.push(page);
+  let succeeded = false;
 
   const skuCapture = startResponseCapture<SkuBizModel>({
     page,
@@ -302,12 +369,16 @@ export async function executeRaw(
       );
     }
 
+    await ensureNotChallenged(page, args.headed === true);
     const sku = await skuCapture.wait();
-    const pageInfo = await readPageInfo(page);
-    return assemble(args.offerId, url, sku, pageInfo);
+    const pageInfo = await readPageInfo(page, args.headed === true);
+    const result = assemble(args.offerId, url, sku, pageInfo);
+    succeeded = true;
+    return result;
   } finally {
     skuCapture.dispose();
     page.off('response', onResp);
+    if (succeeded) await page.close().catch(() => {});
   }
 }
 
@@ -374,7 +445,7 @@ interface PageInfo {
  * Falls back to DOM scraping if the inline data isn't available for some
  * reason (e.g. server rendered a fallback view).
  */
-async function readPageInfo(page: Page): Promise<PageInfo> {
+async function readPageInfo(page: Page, headed = false): Promise<PageInfo> {
   const debug = process.env.BB1688_DEBUG === '1';
   if (debug) {
     page.on('console', (msg) => {
@@ -397,6 +468,8 @@ async function readPageInfo(page: Page): Promise<PageInfo> {
       { timeout: 8000 },
     );
   } catch {
+    // No SSR context: a challenge page looks exactly like this. Never scrape its <title>.
+    if (await ensureNotChallenged(page, headed)) return readPageInfo(page, false);
     return scrapeDomFallback(page);
   }
   // Modest scroll to trigger lazy modules near the SKU + 参数 section.
@@ -617,7 +690,10 @@ async function readPageInfo(page: Page): Promise<PageInfo> {
     }, debug)
     .catch(() => null);
 
-  if (!fromContext) return scrapeDomFallback(page);
+  if (!fromContext) {
+    if (await ensureNotChallenged(page, headed)) return readPageInfo(page, false);
+    return scrapeDomFallback(page);
+  }
 
   // Title from <title> as backup when subject empty.
   let title = fromContext.title;
