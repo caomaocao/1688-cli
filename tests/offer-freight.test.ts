@@ -52,6 +52,7 @@ describe('splitSendArea', () => {
     expect(splitSendArea('内蒙古自治区包头市')).toEqual({ province: '内蒙古', city: '包头市' });
     expect(splitSendArea('广西壮族自治区南宁市')).toEqual({ province: '广西', city: '南宁市' });
     expect(splitSendArea('上海市')).toEqual({ province: '上海', city: '上海市' });
+    expect(splitSendArea('北京市朝阳区')).toEqual({ province: '北京', city: '北京市' });
     expect(splitSendArea('')).toEqual({ province: null, city: null });
     expect(splitSendArea(null)).toEqual({ province: null, city: null });
   });

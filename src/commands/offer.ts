@@ -772,10 +772,8 @@ export function splitSendArea(area: string | null | undefined): {
     }
   }
   for (const city of MUNICIPALITIES) {
-    if (s.startsWith(city)) {
-      const rest = s.slice(city.length).replace(/^市/, '');
-      return { province: city, city: rest || `${city}市` };
-    }
+    // a municipality is its own city; whatever follows ("朝阳区") is a district, not a city
+    if (s.startsWith(city)) return { province: city, city: `${city}市` };
   }
   const m = /^(.+?)省(.*)$/.exec(s);
   if (m) return { province: m[1] ?? null, city: m[2] || null };
