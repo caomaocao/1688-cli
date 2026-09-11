@@ -6,6 +6,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `offer`: the `freight` block now carries what the seller charges to send ONE
+  piece to the logged-in account's address (`cost`, `0` for free shipping,
+  `null` when 1688 quotes nothing, plus `free`) and where it ships from
+  (`sendArea` as 1688 writes it, `province` / `city` split the way a search
+  card spells them, and `divisionCode`). All of it comes off the SKU mtop
+  response's `skuSelectorModel.freightInfo`, which the command already fetched
+  and ignored; no extra request. The human-readable output shows the origin and
+  the quote on the `freight:` line.
 - `image-search --engine plugin`: a second engine that drives the same 1688
   image-search backend through the two mtop calls used by the official
   "1688官方采购助手" extension's 找同款 drawer (`imageBase64ToImageId` +

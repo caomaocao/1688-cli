@@ -1,0 +1,39 @@
+{
+  "note": "trimmed from a real `1688 offer 701556163346` sku mtop response (BB1688_PROBE, 2026-09-11); the receive address is a placeholder",
+  "skuSelectorModel": {
+    "freightInfo": {
+      "deliveryFee": "TEMPLATED",
+      "freeDeliverFee": true,
+      "freeEndAmount": 0,
+      "location": "广东省汕头市",
+      "locationCode": "14320113",
+      "locationDivisionCode": "440513",
+      "logisticsText": "16:00前付款，预计后天送达",
+      "marketingFreePostage": false,
+      "officialLogistics": false,
+      "receiveAddressId": "0000000000",
+      "receiveAddressRegion": "CN",
+      "recieveAddress": "某省某市",
+      "recieveAddressCode": "000000",
+      "subTemplateId": 11762547,
+      "unitWeight": 0
+    }
+  },
+  "extraInfo": {
+    "freightInfo": {
+      "unitWeight": 0,
+      "freeEndAmount": 0,
+      "receiveAddress": "某省某市",
+      "hideDeliveryTime": false,
+      "officialLogistics": false,
+      "sellerUserId": 3955274333,
+      "sendDivisionCode": "440513",
+      "buyerProtectionScene": "fenxiao",
+      "templateId": 11762547,
+      "receiveAddressCode": "000000",
+      "queryFlag": false,
+      "sendAddressCode": "14320113",
+      "offerId": 701556163346
+    }
+  }
+}

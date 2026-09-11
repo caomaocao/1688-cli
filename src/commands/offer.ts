@@ -68,10 +68,17 @@ export interface OfferResult {
     userId: string | null;
   };
   freight: {
+    /** Where the quote ships TO: the logged-in account's default address. */
     receiveAddress: string | null;
+    /** Where the seller ships FROM, as 1688 writes it ("广东省汕头市", sometimes only a province). */
     sendArea: string | null;
     province: string | null;
     city: string | null;
+    /** Division code of the send area ("440513"), 1688's own GB/T 2260 value. */
+    divisionCode: string | null;
+    /** Yuan for ONE piece to `receiveAddress` (0 = free shipping); null when 1688 quotes nothing. */
+    cost: number | null;
+    free: boolean | null;
     unitWeight: number | null;
   };
   saledCount: number | null;
@@ -398,6 +405,15 @@ interface SkuBizModel {
   >;
   skuPriceScale?: string;
   skuSelectorModel?: {
+    /** The freight template worked out for the logged-in account's address. */
+    freightInfo?: {
+      totalCost?: number | string;
+      freeDeliverFee?: boolean;
+      location?: string;
+      locationDivisionCode?: number | string;
+      recieveAddress?: string;
+      unitWeight?: number;
+    };
     tradeModel?: {
       beginAmount?: number | string;
       saleCount?: number | string;
@@ -413,6 +429,7 @@ interface SkuBizModel {
       unitWeight?: number;
       receiveAddress?: string;
       sendAddressCode?: string;
+      sendDivisionCode?: number | string;
       sellerUserId?: number | string;
     };
   };
@@ -427,9 +444,6 @@ interface PageInfo {
   saledCount: number | null;
   mainImage: string | null;
   images: string[];
-  sendArea: string | null;
-  province: string | null;
-  city: string | null;
   categoryId: string | null;
   detailUrl: string | null;
   attributes: ProductAttribute[];
@@ -682,9 +696,6 @@ async function readPageInfo(page: Page, headed = false): Promise<PageInfo> {
         saledCount: null,
         mainImage: imgs[0] ?? null,
         images: imgs,
-        sendArea: null,
-        province: null,
-        city: null,
         categoryId: catId,
       };
     }, debug)
@@ -733,13 +744,75 @@ async function scrapeDomFallback(page: Page): Promise<PageInfo> {
     saledCount: null,
     mainImage: info.mainImage,
     images: info.mainImage ? [info.mainImage] : [],
-    sendArea: null,
-    province: null,
-    city: null,
     categoryId: null,
     detailUrl: null,
     attributes: [],
     packageInfo: [],
+  };
+}
+
+/** Regions whose name is not simply "<name>省". */
+const AUTONOMOUS_REGIONS = ['内蒙古', '广西', '西藏', '宁夏', '新疆'];
+const MUNICIPALITIES = ['北京', '天津', '上海', '重庆'];
+
+/**
+ * `广东省汕头市` -> `{ province: '广东', city: '汕头市' }`, spelled the way a search
+ * card writes a location. A seller who filled in only the province leaves `city` null.
+ */
+export function splitSendArea(area: string | null | undefined): {
+  province: string | null;
+  city: string | null;
+} {
+  const s = (area ?? '').trim();
+  if (!s) return { province: null, city: null };
+  for (const region of AUTONOMOUS_REGIONS) {
+    if (s.startsWith(region)) {
+      const rest = s.slice(region.length).replace(/^.*?自治区/, '');
+      return { province: region, city: rest || null };
+    }
+  }
+  for (const city of MUNICIPALITIES) {
+    if (s.startsWith(city)) {
+      const rest = s.slice(city.length).replace(/^市/, '');
+      return { province: city, city: rest || `${city}市` };
+    }
+  }
+  const m = /^(.+?)省(.*)$/.exec(s);
+  if (m) return { province: m[1] ?? null, city: m[2] || null };
+  return { province: s, city: null };
+}
+
+/**
+ * The freight block of one offer, read off the SKU mtop response: what the seller
+ * charges to send ONE piece to the logged-in account's address, and where from.
+ *
+ * 1688 puts the money in `skuSelectorModel.freightInfo` — `totalCost` when it costs
+ * something, nothing at all when `freeDeliverFee` says the buyer pays nothing — and the
+ * send area in the same block (`location` + `locationDivisionCode`). A missing amount on
+ * a non-free offer is left null: "1688 told us nothing" must not read as "free".
+ */
+export function freightOf(
+  sku: SkuBizModel | null | undefined,
+): OfferResult['freight'] {
+  const model = sku?.skuSelectorModel?.freightInfo ?? {};
+  const extra = sku?.extraInfo?.freightInfo ?? {};
+  const free = typeof model.freeDeliverFee === 'boolean' ? model.freeDeliverFee : null;
+  const quoted =
+    model.totalCost === undefined || model.totalCost === null
+      ? null
+      : parseFloatOrNull(String(model.totalCost));
+  const sendArea = model.location ? String(model.location) : null;
+  const divisionCode = model.locationDivisionCode ?? extra.sendDivisionCode ?? null;
+  const { province, city } = splitSendArea(sendArea);
+  return {
+    receiveAddress: extra.receiveAddress ?? model.recieveAddress ?? null,
+    sendArea,
+    province,
+    city,
+    divisionCode: divisionCode === null ? null : String(divisionCode),
+    cost: free === true ? 0 : quoted,
+    free,
+    unitWeight: extra.unitWeight ?? model.unitWeight ?? null,
   };
 }
 
@@ -796,13 +869,7 @@ function assemble(
     },
   );
 
-  const freight = {
-    receiveAddress: sku?.extraInfo?.freightInfo?.receiveAddress ?? null,
-    sendArea: info.sendArea,
-    province: info.province,
-    city: info.city,
-    unitWeight: sku?.extraInfo?.freightInfo?.unitWeight ?? null,
-  };
+  const freight = freightOf(sku);
 
   const fallbackImage =
     info.mainImage ?? options[0]?.values[0]?.imageUrl ?? null;
@@ -969,9 +1036,16 @@ function printOffer(o: OfferResult): void {
   if (o.supplier.name) {
     process.stdout.write(`  supplier: ${o.supplier.name}\n`);
   }
-  if (o.freight.receiveAddress) {
+  if (o.freight.receiveAddress || o.freight.sendArea) {
+    const cost =
+      o.freight.cost === null
+        ? ''
+        : o.freight.cost === 0
+          ? ', free'
+          : `, ¥${o.freight.cost}`;
     process.stdout.write(
-      `  freight:  to ${o.freight.receiveAddress}` +
+      `  freight:  ${o.freight.sendArea ? `from ${o.freight.sendArea} ` : ''}to ${o.freight.receiveAddress ?? '?'}` +
+        cost +
         (o.freight.unitWeight ? `, ${o.freight.unitWeight}kg/unit` : '') +
         '\n',
     );
