@@ -494,10 +494,14 @@ CSV table.
     userId: string | null,
   },
   freight: {
-    receiveAddress: string | null,
-    sendArea: string | null,
-    province: string | null,
-    city: string | null,
+    receiveAddress: string | null,   // where the quote ships TO (the account's default address)
+    sendArea: string | null,         // where it ships FROM, as 1688 writes it ("广东省汕头市")
+    province: string | null,         // sendArea split the way a search card spells a location
+    city: string | null,             // null when the seller named only a province
+    divisionCode: string | null,     // division code of the send area ("440513")
+    cost: number | null,             // yuan for ONE piece to receiveAddress; 0 = free shipping,
+                                     // null = 1688 quoted nothing (never read a gap as free)
+    free: boolean | null,
     unitWeight: number | null,
   },
   saledCount: number | null,
