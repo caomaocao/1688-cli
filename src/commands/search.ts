@@ -18,6 +18,7 @@ import {
 } from '../session/search-mtop.js';
 import { parseMtopJsonp } from '../session/mtop.js';
 import { sleep, waitWithDeadline } from '../session/wait.js';
+import { detectPageState } from '../session/page-state.js';
 import type { OfferResult, OfferArgs } from './offer.js';
 import {
   applySearchControls,
@@ -507,7 +508,7 @@ async function fetchSearch(
     }
     if (!got) {
       if (pageNum === 1) {
-        throw riskControlError(headed);
+        throw await searchRefusedError(page, headed);
       }
       info(
         `Page ${pageNum} blocked or empty — returning ${allOffers.length} ` +
@@ -808,6 +809,32 @@ async function waitPastBlocking(
     intervalMs: 500,
     onTimeout: () => false,
   });
+}
+
+/**
+ * Page 1 ended without a results call. Say what the page actually is before blaming a slider:
+ * a challenge page (solve it), a rate-limit notice, or — the case that used to be reported as
+ * "slider not solved" although nothing was ever shown — a bounce back to the homepage, which is
+ * 1688 throttling this session's search endpoint. Same exit code (4, RISK_CONTROL): the caller
+ * still must not retry blindly; only the advice differs.
+ */
+async function searchRefusedError(page: Page, triedHeaded: boolean): Promise<CliError> {
+  const state = await detectPageState(page).catch(() => null);
+  if (!state || state.kind === 'risk_challenge') return riskControlError(triedHeaded);
+  if (state.kind === 'rate_limited') {
+    return new CliError(
+      4,
+      'RISK_CONTROL',
+      `1688 rate-limited the search page (${state.url}). Wait a while and retry; image search and offer pages are unaffected.`,
+    );
+  }
+  return new CliError(
+    4,
+    'RISK_CONTROL',
+    `1688 refused the search: no results arrived and the page ended on ${state.url} (${state.kind}); no slider was shown. ` +
+      'The search endpoint is throttling this session — reload the daemon (`1688 daemon reload --profile default`) and retry later; ' +
+      'image search and offer pages are unaffected.',
+  );
 }
 
 function riskControlError(triedHeaded: boolean): CliError {
