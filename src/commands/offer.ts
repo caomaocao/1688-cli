@@ -4,10 +4,12 @@ import { emit, info } from '../io/output.js';
 import { CliError } from '../io/errors.js';
 import { withRecovery } from '../session/recovery.js';
 import { sleep } from '../session/wait.js';
-import { detectPageState, recoverHintForPageState } from '../session/page-state.js';
+import { detectPageState, isLoginUrl, recoverHintForPageState } from '../session/page-state.js';
 import { parseMtop } from '../session/mtop.js';
 import { startResponseCapture } from '../session/response-capture.js';
 import { debugTmpPath } from '../util/temp.js';
+import { refreshStateFromContext, waitForManualLogin } from '../session/manual-login.js';
+import { hasLiveSession } from '../auth/cookies.js';
 
 export interface OfferOpts {
   offerId?: string;
@@ -36,6 +38,8 @@ export interface OfferBatchResult {
 export interface OfferArgs {
   offerId: string;
   headed?: boolean;
+  /** Only used to refresh `state.json` after a login done in the `--headed` window. */
+  profile?: string;
 }
 
 export interface OfferResult {
@@ -166,7 +170,11 @@ const CHALLENGE_SOLVE_TIMEOUT_MS = 180000;
  * RISK_CONTROL failure (exit 4, like the plugin engine); with `--headed` the user gets time to
  * solve it in the visible window. Returns true when a challenge was solved (the page has reloaded).
  */
-async function ensureNotChallenged(page: Page, headed: boolean): Promise<boolean> {
+async function ensureNotChallenged(
+  page: Page,
+  headed: boolean,
+  relogin?: () => Promise<void>,
+): Promise<boolean> {
   const state = await detectPageState(page).catch(() => null);
   if (!state || state.kind !== 'risk_challenge') return false;
   if (!headed) {
@@ -183,12 +191,16 @@ async function ensureNotChallenged(page: Page, headed: boolean): Promise<boolean
     );
   }
   info('1688 is showing a verification challenge. Solve it in the browser window...');
-  const deadline = Date.now() + CHALLENGE_SOLVE_TIMEOUT_MS;
+  let deadline = Date.now() + CHALLENGE_SOLVE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (page.isClosed()) throw new CliError(130, 'CANCELED', 'Browser closed.');
     const kind = (await detectPageState(page).catch(() => null))?.kind ?? 'unknown';
     if (kind === 'not_logged_in') {
-      throw new CliError(3, 'NOT_LOGGED_IN', 'Session expired. Run `1688 login`.');
+      // Solving the slider can hand over to the login page; log in right here too.
+      if (!relogin) throw new CliError(3, 'NOT_LOGGED_IN', 'Session expired. Run `1688 login`.');
+      await relogin();
+      deadline = Date.now() + CHALLENGE_SOLVE_TIMEOUT_MS;
+      continue;
     }
     if (kind === 'normal_1688_page') {
       info('Verification solved. Continuing...');
@@ -219,7 +231,7 @@ export async function executeRaw(
   opened?.push(page);
   let succeeded = false;
 
-  const skuCapture = startResponseCapture<SkuBizModel>({
+  const startSkuCapture = () => startResponseCapture<SkuBizModel>({
     page,
     timeoutMs: 18000,
     matcher: SKU_API_RE,
@@ -243,6 +255,7 @@ export async function executeRaw(
       return json?.data?.skuSelectorBizModel ?? null;
     },
   });
+  let skuCapture = startSkuCapture();
   const onResp = async (resp: PWResponse) => {
     // Probe: save every offerdetail.service response so we can see which
     // call carries productAttributes.
@@ -368,17 +381,33 @@ export async function executeRaw(
         `Failed to load offer page: ${(e as Error).message}`,
       );
     }
-    if (/login\.1688\.com|login\.taobao\.com/.test(page.url())) {
-      throw new CliError(
-        3,
-        'NOT_LOGGED_IN',
-        'Session expired. Run `1688 login`.',
-      );
+    const loggedIn = async () => hasLiveSession(await ctx.cookies());
+    const relogin = async () => {
+      await waitForManualLogin(page, {
+        returnUrl: url,
+        isLoggedIn: loggedIn,
+        onLoggedIn: refreshStateFromContext(ctx, args.profile),
+      });
+      // The anonymous load already answered the SKU call (no receive address, no freight
+      // quote); listen again for the logged-in one.
+      skuCapture.dispose();
+      skuCapture = startSkuCapture();
+    };
+    // Logged out, 1688 either redirects to the login page or serves the offer anonymously.
+    if (isLoginUrl(page.url()) || !(await loggedIn())) {
+      if (args.headed !== true) {
+        throw new CliError(
+          3,
+          'NOT_LOGGED_IN',
+          'Session expired. Run `1688 login`.',
+        );
+      }
+      await relogin();
     }
 
-    await ensureNotChallenged(page, args.headed === true);
+    await ensureNotChallenged(page, args.headed === true, relogin);
     const sku = await skuCapture.wait();
-    const pageInfo = await readPageInfo(page, args.headed === true);
+    const pageInfo = await readPageInfo(page, args.headed === true, relogin);
     const result = assemble(args.offerId, url, sku, pageInfo);
     succeeded = true;
     return result;
@@ -459,7 +488,11 @@ interface PageInfo {
  * Falls back to DOM scraping if the inline data isn't available for some
  * reason (e.g. server rendered a fallback view).
  */
-async function readPageInfo(page: Page, headed = false): Promise<PageInfo> {
+async function readPageInfo(
+  page: Page,
+  headed = false,
+  relogin?: () => Promise<void>,
+): Promise<PageInfo> {
   const debug = process.env.BB1688_DEBUG === '1';
   if (debug) {
     page.on('console', (msg) => {
@@ -483,7 +516,7 @@ async function readPageInfo(page: Page, headed = false): Promise<PageInfo> {
     );
   } catch {
     // No SSR context: a challenge page looks exactly like this. Never scrape its <title>.
-    if (await ensureNotChallenged(page, headed)) return readPageInfo(page, false);
+    if (await ensureNotChallenged(page, headed, relogin)) return readPageInfo(page, false);
     return scrapeDomFallback(page);
   }
   // Modest scroll to trigger lazy modules near the SKU + 参数 section.
@@ -702,7 +735,7 @@ async function readPageInfo(page: Page, headed = false): Promise<PageInfo> {
     .catch(() => null);
 
   if (!fromContext) {
-    if (await ensureNotChallenged(page, headed)) return readPageInfo(page, false);
+    if (await ensureNotChallenged(page, headed, relogin)) return readPageInfo(page, false);
     return scrapeDomFallback(page);
   }
 
@@ -962,7 +995,7 @@ export async function run(opts: OfferOpts): Promise<void> {
   if (ids.length === 1) {
     const data = await dispatch<OfferArgs, OfferResult>(
       'offer',
-      { offerId: ids[0]!, headed: opts.headed },
+      { offerId: ids[0]!, headed: opts.headed, profile: opts.profile },
       { headed: opts.headed, profile: opts.profile, noDaemon: opts.pro === true },
     );
     emit({
@@ -988,7 +1021,7 @@ export async function run(opts: OfferOpts): Promise<void> {
     try {
       const data = await dispatch<OfferArgs, OfferResult>(
         'offer',
-        { offerId, headed: opts.headed },
+        { offerId, headed: opts.headed, profile: opts.profile },
         { headed: opts.headed, profile: opts.profile, noDaemon: opts.pro === true },
       );
       offers.push(data);

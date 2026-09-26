@@ -14,6 +14,16 @@ export function parseIdentity(cookies: Cookie[]): Identity | null {
   return { memberId, nick };
 }
 
+/**
+ * Whether the cookie jar still carries a live 1688 login. A logged-out account keeps browsing:
+ * 1688 no longer redirects the offer page to the login page but renders it for an anonymous
+ * visitor ("登录查看全部规格", no receive address), drops `unb` and sets `__cn_logon__=false`.
+ */
+export function hasLiveSession(cookies: Cookie[]): boolean {
+  if (!parseIdentity(cookies)) return false;
+  return pick(cookies, '__cn_logon__', '.1688.com') !== 'false';
+}
+
 function pick(
   cookies: Cookie[],
   name: string,

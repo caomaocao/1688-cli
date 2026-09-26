@@ -8,6 +8,7 @@ import { CliError } from '../io/errors.js';
 import { nowIso } from '../util/time.js';
 import { defaultProfileName, loginQrFile, ensureRoot } from '../session/paths.js';
 import { sleep } from '../session/wait.js';
+import { LOGIN_URL } from '../session/manual-login.js';
 
 export interface LoginOpts {
   force?: boolean;
@@ -35,7 +36,6 @@ async function ensureDaemonStarted(opts: LoginOpts): Promise<void> {
   }
 }
 
-const LOGIN_URL = 'https://login.1688.com/member/signin.htm?tbpm=1';
 const WARMUP_URL =
   'https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html';
 

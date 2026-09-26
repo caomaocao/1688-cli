@@ -22,6 +22,10 @@ export interface PageSnapshot {
 }
 
 const LOGIN_RE = /(?:login\.(?:1688|taobao)\.com|passport\.1688\.com)/i;
+export function isLoginUrl(url: string): boolean {
+  return LOGIN_RE.test(url);
+}
+
 const RISK_URL_RE = /(?:\/punish\b|x5secdata)/i;
 const RISK_TEXT_RE =
   /(滑块|拖动.*验证|安全验证|验证码|验证一下|检测到.*异常|环境异常|nc[_-]?captcha|请完成验证|captcha|slide to verify|verify (?:you are|that you're) human)/i;
